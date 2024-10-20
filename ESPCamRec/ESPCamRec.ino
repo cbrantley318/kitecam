@@ -10,7 +10,14 @@
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
-const int PRINT_SERVER_TO_SERIAL = 0;
+
+
+const char *ssid = "KiteCam";
+const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
+
+const int PRINT_SERVER_TO_SERIAL = 1;
+AsyncUDP udp;
+
 
 #include <FS.h>
 #include <SPIFFS.h>
@@ -27,14 +34,8 @@ const int BUF_SIZE = 42000;
 
 fs::File myfile;
 
-
-
-
-
 #include <SPI.h>
-
 #include <XPT2046_Bitbang.h>
-
 #include <TFT_eSPI.h>
 
 
@@ -53,8 +54,6 @@ fs::File myfile;
 
 XPT2046_Bitbang ts(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS);
 
-
-
 //setting calibration constants 
 int xMin = 200;
 int xMax = 3700;
@@ -64,64 +63,30 @@ int yMax = 3800;
 int screenHeight = TFT_HEIGHT;
 int screenWidth = TFT_WIDTH;
 
-
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button key[2];
+bool screenReady = false;
 
 
-
-ESPNowCam radio;
-
-
-
-
-// frame buffer
+//image frame buffer and size
 uint8_t *fb; 
-// display globals
+uint32_t fb_i = 0;
 int32_t dw, dh;
-
-int minLen = 10000;
-int maxLen = 0;
 int frameCount = 0;
-
-void onDataReady(uint32_t length) {
-  Serial.print("callbacked length = "); Serial.println(length);
-  int magicNum = (fb[0] << 24) | (fb[1] << 16) | (fb[length-2] << 8) | (fb[length-1]);
-
-  // Serial.print(frameCount); Serial.print("   ");
-  // Serial.print(fb[0], HEX);Serial.print(fb[1], HEX);Serial.print(" ");Serial.print(fb[length-2], HEX);Serial.println(fb[length-1], HEX);
-
-
-  if (isValidJPEG(fb, length)) {
-    drawImagefromRAM((const char*) fb, length);
-  }
-  tft.drawCentreString("got an image", 320/2, 195, 2);
-  tft.drawNumber(frameCount, 320/2, 210);
-  frameCount++;
-}
 
 void setup() {
   Serial.begin(115200);
+
+  createWifiAP();
+  handleUDPClient();
 
   // BE CAREFUL WITH IT, IF JPG LEVEL CHANGES, INCREASE IT
   fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
   fb[0] = 0;
   
-  // radio.setRecvBuffer(fb);
-  // radio.setRecvCallback(onDataReady);
-
-  //this needs to happen before the display is initialized otherwise some elvish fuckery happens
-  if (radio.init()) {
-    Serial.println("radio initied");
-  }
-
-  // Serial.println("This was the most recent debugging statement written");
-
-
   tft.init();
   tft.setRotation(1);
   tft.startWrite();
-
   Serial.println("TFT initted");
 
   if (tft.getRotation()%2 == 1) {   //switch the height and width values if rotated display
@@ -147,6 +112,7 @@ void setup() {
   }
 
   tft.drawCentreString("General__Touch Screen to Start__Kenobi", x, y, fontSize);
+  screenReady = true;
 
   // copyFileintoRAM(fb, SPIFFS, PHOTO_URI);
   // drawImagefromRAM((const char*) fb, BUF_SIZE);
@@ -154,7 +120,7 @@ void setup() {
 
   delay(1000);
 }
-
+int loopcount = 0;
 void loop() {
   //adding in code to register button presses, possibly (unless I can do it with interrupts / callbacks)
   delay(10);
@@ -349,20 +315,30 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
     Serial.println("UDP connected");
     udp.onPacket([](AsyncUDPPacket packet) {
 
+      if (!screenReady) {
+        return;
+      }
+
       if (PRINT_SERVER_TO_SERIAL) { //this is just to clean up the serial monitor in case I don't want to print stuff
         Serial.print("UDP Packet Type: ");  Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
         Serial.print(", From: ");           Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
         Serial.print(", To: ");             Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
-        Serial.print(", Length: ");         Serial.print(packet.length());    Serial.print(", Data: "); Serial.write(packet.data(), packet.length()); Serial.println();
+        Serial.print(", Length: ");         Serial.print(packet.length());    
+        //Serial.print(", Data: ");           Serial.write(packet.data(), packet.length());   
+        Serial.println();
       }
-      //reply to the client
-      // packet.printf("Got %u bytes of data", packet.length());
 
       // Serial.print(frameCount); Serial.print("   ");
       // Serial.print(fb[0], HEX);Serial.print(fb[1], HEX);Serial.print(" ");Serial.print(fb[length-2], HEX);Serial.println(fb[length-1], HEX);
 
+      IPAddress targetIP = packet.remoteIP();
+      uint16_t targetPort = packet.remotePort();
+
       uint8_t* recvData = packet.data();
-      recvLength = packet.length();
+      int recvLength = packet.length();
+      int idx = 0;
+      uint32_t chunk_size = 0;
+
 
       if (recvLength > 4) { //just an arbitrary length, hope it doesn't bite me later
         switch(recvData[0]) {
@@ -373,25 +349,87 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
 
           case 0x12: //contains other information from camera to the screen TBD
 
+
           break;
-          case 0xFF:  //this means it's probably a jpeg
-          
-            if (isValidJPEG(recvData, recvLength)) {
-              memcpy(fb, recvData, recvLength);
-              drawImagefromRAM((const char*) fb, recvLength);
-            } 
+
+          case 0x25:  //this means we got one chunk of the data, loading it into frame buffer
+            // Serial.println("CHUNK RECV'D");
+            idx = recvData[1];  //seq num of this packet
+            //reconstruct the chunk size from the packet header
+            chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+            // Serial.println(chunk_size);
+            // if (idx*chunk_size != fb_i) {
+            //   Serial.println("Chunk size mismatch");
+            //   Serial.print(idx); Serial.print(" "); Serial.print(chunk_size); Serial.print(" "); Serial.print(fb_i);
+            // }
+            fb_i = idx * chunk_size;
+            memcpy(&fb[fb_i], &recvData[8], chunk_size);  //chunk_size should be same as recvLength - 8 but not leaving anything to chance
+          break;
+
+          case 0x26: //last chunk of data was received, reset buffer pointer, display image
+            // Serial.println("FINAL CHUNK");
+            idx = recvData[1];  //seq num of this packet
+            chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+            fb_i = idx * chunk_size;
+            memcpy(&fb[fb_i], &recvData[8], recvLength - 8);
+            fb_i += recvLength - 8; //total length of image
+
+            if (isValidJPEG(fb, fb_i)) {
+              drawImagefromRAM((const char*) fb, fb_i);
+            }
             tft.drawCentreString("got an image", 320/2, 195, 2);
             tft.drawNumber(frameCount, 320/2, 210);
             frameCount++;
-            break;
+            fb_i = 0;
 
-          default:  //unknown packet type
+          break;
+
+
+
+          case 0xFF:  //this means it's probably a jpeg
+            Serial.println("Proccsign JPEGGGG");
+
+            for (int i = 0; i < recvLength; i++) {
+              Serial.print(recvData[i],HEX);
+              Serial.print(" ");
+            }
+            Serial.println();
+
+            // Serial.print(recvData[0], HEX);Serial.print(recvData[1], HEX);Serial.print(" ");Serial.print(recvData[recvLength-2], HEX);Serial.println(recvData[recvLength-1], HEX);
+            if (isValidJPEG(recvData, recvLength)) {
+              Serial.println("IT WAS VALID");
+              tft.drawCentreString("got an image", 320/2, 195, 2);
+              tft.drawNumber(frameCount, 320/2, 210);
+              frameCount++;
+              memcpy(fb, recvData, recvLength);
+              drawImagefromRAM((const char*) fb, recvLength);
+            } 
+          break;
+
+          default:  //unknown packet type, don't respond
+            Serial.println("Unknownpacket");
+          break;
 
         } //end of switchcase
       } // if (recvLength > 4)
 
-    });
+      if (packet.length() < 20) {
 
+        //reply to the client
+        // packet.printf("Got %u bytes of data", packet.length());
+        uint8_t sendData = 0x03;
+        udp.writeTo(&sendData, 0x01, IPAddress(192, 168, 4, 2), 1234);
+
+      } else {
+            // for (int i = 0; i < recvLength; i++) {
+            //   Serial.print(recvData[i],HEX);
+            //   Serial.print(" ");
+            // }
+            // Serial.println();
+      }
+
+    });
+    // udp.print("Hello Server!");
   }
 }
 
