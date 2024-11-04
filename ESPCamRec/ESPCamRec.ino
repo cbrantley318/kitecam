@@ -14,29 +14,30 @@
 
 const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
+#define AP_MODE false
 
 const int PRINT_SERVER_TO_SERIAL = 0;
 const int UDP_PORT = 1234;
 AsyncUDP udp;
 
-IPAddress targetIP;
-uint16_t targetPort;
+IPAddress targetIP = IPAddress(192,168,4,2);
+uint16_t targetPort = 0;
 
 
-// #include <FS.h>
-// #include <SPIFFS.h>
-// #include <Utils.h>
-// #define FORMAT_SPIFFS_IF_FAILED true
+#include <FS.h>
+#include <SPIFFS.h>
+#include <Utils.h>
+#define FORMAT_SPIFFS_IF_FAILED true
 
 
 #include <JPEGDEC.h>
 
 JPEGDEC jpeg;
-const char *PHOTO_URI = "/album.jpg";
+const char *PHOTO_URI = "/carson.jpg";
 const int BUF_SIZE = 16384;
 
 
-// fs::File myfile;
+fs::File myfile;
 
 #include <SPI.h>
 #include <XPT2046_Bitbang.h>
@@ -67,8 +68,9 @@ int yMax = 3800;
 int screenHeight = TFT_HEIGHT;
 int screenWidth = TFT_WIDTH;
 
+const int NUM_BUTTONS = 13;
 TFT_eSPI tft = TFT_eSPI();
-TFT_eSPI_Button key[2];
+TFT_eSPI_Button key[NUM_BUTTONS];
 bool screenReady = false;
 
 
@@ -91,44 +93,74 @@ uint8_t ack = 0x01;
 
 
 
-  //the list of buttons available (or joystick inputs) are as follows (not in order): 
-  /*
-    btn0: connect to gopro
-    btn1: connect to iphone
-    btn2: connect to android
-    btn3: pan left
-    btn4: pan right
-    btn5: tilt up
-    btn6: tilt down
-    btn7: take photo
-    btn8: turn off / sleep mode
-    btn9: request image quality down
-    btn10:
+//the list of buttons available (or joystick inputs) are as follows (not in order): 
+/*
+  btn0: connect to gopro                  \
+  btn1: connect to iphone                  >  0x1X
+  btn2: connect to android                /
+  btn3: pan left                          \
+  btn4: pan right                          \ 0x2X
+  btn5: tilt up                            /
+  btn6: tilt down                         /
+  btn7: take photo                        \
+  bn8: stop video                          \
+  btn9: video mode                         / 0x3X
+  btn10: photo mode                       /
+  btn11: TBD
+  btn12: request data sent back (sends back all data)     > 0x4X
 
-  */    
+*/    
+
 //control signals to transmit
 //                     |    connect  |     direction     |  camera | espcontrol
-uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
-uint8_t tansCmdAmount = 11;
+// uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
+uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x33,0x34,0x40,0x41};
+uint8_t transCmdAmount = 11;
 
 
 void setup() {
   Serial.begin(115200);
 
-  createWifiAP();     //the screen is the wifi AP and the server
-  handleUDPServer();  //the camera will be station and client (idk why but originally i did the reverse which was just stupid)
+  delay(500);
+
+
+  if (AP_MODE) {
+    //AP MODE 
+    createWifiAP();     //the screen is the wifi AP and the server
+    handleUDPServer();  //the camera will be station and client (idk why but originally i had this as AP and client which was just bad)
+  } else {
+    //STATION MODE (using another as relay)
+    createWifiStation();
+    handleUDPClient();
+  }
+
 
   // frame buffer for image, it's kinda big so 
   fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
   fb[0] = 0;
 
 
+  // this is for initializing the on-chip file system (SPIFFS)
+    char partiname[64];
+    int spiffsize;
+    int spiffusage;
+
+    if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
+        Serial.println("SPIFFS Mount Failed");
+        return;
+    }
+    // copyFileintoRAM(fb, SPIFFS, PHOTO_URI);
+    // drawImagefromRAM((const char*) fb, BUF_SIZE);
+  
+
+  //initialize the touch screen (will want to make this and the display into methods like wifi and UDP)
   ts.begin();
   ts.setCalibration(xMin, xMax, yMin, yMax);
-  // ts.setRotation(1);
-  
+
+  //initialize the display
   tft.init();
   tft.setRotation(1);
+  // tft.invertDisplay(1);   //only include if using the other brand of display
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -142,21 +174,9 @@ void setup() {
   int x = 320 / 2;  // center of display
   int y = 100;
   int fontSize = 2;
-  tft.drawCentreString("Hello___Touch Screen to Start____There", x, y, fontSize);
+  // tft.drawCentreString("Hello___Touch Screen to Start____There", x, y, fontSize);
   y +=30;
-
-  // char partiname[64];
-  // int spiffsize;
-  // int spiffusage;
-
-  // if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
-  //     Serial.println("SPIFFS Mount Failed");
-  //     return;
-  // }
-  // copyFileintoRAM(fb, SPIFFS, PHOTO_URI);
-  // drawImagefromRAM((const char*) fb, BUF_SIZE);
-
-  tft.drawCentreString("General__Touch Screen to Start__Kenobi", x, y, fontSize);
+  // tft.drawCentreString("General__Touch Screen to Start__Kenobi", x, y, fontSize);
   drawButtons();
   screenReady = true;
   delay(1000);
@@ -177,21 +197,21 @@ void loop() {
   //adding in code to register button presses, possibly (unless I can do it with interrupts / callbacks)
   TouchPoint p = ts.getTouch();
   if (p.zRaw > 100) {
-  printTouchToSerial(p);
-  printTouchToDisplay(p);
-  // key[0].drawButton(false);
-  // key[1].drawButton(false);
-
+    // printTouchToSerial(p);
+    // printTouchToDisplay(p);
   }
-  for (uint8_t i = 0; i < 2; i++) {
-    if (key[i].contains(p.x,p.y)) {
+  // printTouchToDisplay(p);
+
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+    if ( p.zRaw > 100 && key[i].contains(p.x,p.y)) {
         key[i].press(true);
     } else {
         key[i].press(false);
     }
   }
 
-  for (uint8_t i = 0; i < 2; i++) {
+
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) { //this should actually only be for refreshing the display,
     if (key[i].justPressed()) {
       handleButtonPress(i);
       key[i].drawButton(true);
@@ -200,8 +220,30 @@ void loop() {
     }
   }
 
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+
+  }
+
   delay(10);
+}//loop();
+
+void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
+    // Serial.printf("Reading file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+      if(!file){
+          Serial.println("- failed to open file for writing");
+          return;
+      }
+      if(file.write(buf, len)){
+          Serial.println("- file written");
+      } else {
+          Serial.println("- write failed");
+      }
+      file.close();
 }
+
+//stuff for SPIFFS
 
 /*
 void listDir(fs::FS &fs, const char * dirname, uint8_t levels){
@@ -344,10 +386,11 @@ int drawImagefromRAM(const char *imageBuffer, int size) {
     lTime = millis();
     jpeg.openRAM((uint8_t *)imageBuffer, size, JPEGDraw);
     jpeg.setPixelType(1);
-    int imagePosition = 320/2 - (150 / 2);
+    int imagePositionX = 320/4;
+    int imagePositionY = 240/4;
     // decode will return 1 on sucess and 0 on a failure
-    int decodeStatus = jpeg.decode(0, 0, 0);                       //for full size display
-    // int decodeStatus = jpeg.decode(imagePosition, 0, JPEG_SCALE_HALF);   //for one-quarter size (half in each dimension)
+    // int decodeStatus = jpeg.decode(0, 0, 0);                       //for full size display
+    int decodeStatus = jpeg.decode(imagePositionX, imagePositionY, JPEG_SCALE_HALF);   //for one-quarter size (half in each dimension)
     // jpeg.decode(45, 0, 0);
     jpeg.close();
     // Serial.print("Time taken to decode and display Image (ms): ");
@@ -387,13 +430,23 @@ void createWifiAP() {
     Serial.println(nums);
 }
 
+void createWifiStation() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.println("WiFi Failed");
+    while (1) {
+      delay(1000);
+    }
+  }
+}
+
 //this inits the udp server and has the packet handler code -> very important!!!
 void handleUDPServer() {   //for use by the screen (client and Access Point) 
   if (udp.listen(WiFi.softAPIP(),UDP_PORT)) {
     Serial.print("UDP listening on IP: ");
     Serial.println(WiFi.softAPIP());
     udp.onPacket([](AsyncUDPPacket packet) {
-
 
       if (!screenReady) { //to prevent the thing from crashing / heap error / badness (also, depending on the model board used, the WiFi antenna can mess with the TFT init. my board is one such case)
         return;
@@ -431,7 +484,6 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
 
           case 0x12: //contains other information from camera to the screen TBD
 
-
           break;
 
           case 0x25:  //this means we got one chunk of the data, loading it into frame buffer
@@ -460,11 +512,7 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
               fbReady = true;
               writefb = fb;
               writefb_i = fb_i;
-              // drawImagefromRAM((const char*) fb, fb_i);
             }
-            // tft.drawCentreString("got an image", 320/2, 195, 2);
-            // tft.drawNumber(frameCount, 320/2, 210);
-            // frameCount++;
             fb_i = 0;
 
           break;
@@ -478,7 +526,6 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
 
       if (packet.length() < 20) {
 
-
         Serial.print("UDP Packet Type: ");  Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
         Serial.print(", From: ");           Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
         Serial.print(", To: ");             Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
@@ -489,7 +536,7 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
         //reply to the client
         // packet.printf("Got %u bytes of data", packet.length());
         uint8_t sendData = 0x03;
-        udp.writeTo(&sendData, 0x01, IPAddress(192, 168, 4, 2), 1234);
+        udp.writeTo(&sendData, 0x01, targetIP, targetPort);
 
       } else {
             // for (int i = 0; i < recvLength; i++) {
@@ -504,24 +551,133 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
   }
 }
 
+void handleUDPClient() {   //for use by the screen (client and Access Point) 
+  if (udp.connect(IPAddress(192, 168, 4, 1), UDP_PORT)) {
+    Serial.println("UDP connected");
+    udp.onPacket([](AsyncUDPPacket packet) {
+
+      if (!screenReady) { //to prevent the thing from crashing / heap error / badness (also, depending on the model board used, the WiFi antenna can mess with the TFT init. my board is one such case)
+        return;
+      }
+      //this means no devices will receive a response until the screen is ready
+
+      if (PRINT_SERVER_TO_SERIAL) { //this is just to clean up the serial monitor in case I don't want to print stuff
+        Serial.print("UDP Packet Type: ");  Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
+        Serial.print(", From: ");           Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
+        Serial.print(", To: ");             Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
+        Serial.print(", Length: ");         Serial.print(packet.length());    
+        //Serial.print(", Data: ");           Serial.write(packet.data(), packet.length());   
+        Serial.println();
+      }
+
+      recvData = packet.data();
+      recvLength = packet.length();
+      idx = 0;
+
+        switch(recvData[0]) {
+
+          case 0x01: //initial message from camera
+            targetIP = packet.remoteIP();
+            targetPort = packet.remotePort();
+            udp.writeTo(&ack, 0x01, targetIP, targetPort);
+          break;
+
+          case 0x11:  //contains camera data (i.e. numPhotosTaken, current position, current mode photo/video)
+
+          break;
+          case 0x12: //contains other information from camera to the screen TBD
+
+          break;
+          case 0x25:  //this means we got one chunk of the data, loading it into frame buffer
+            // Serial.println("CHUNK RECV'D");
+            idx = recvData[1];  //seq num of this packet
+            //reconstruct the chunk size from the packet header
+            chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+            // Serial.println(chunk_size);
+            // if (idx*chunk_size != fb_i) {
+            //   Serial.println("Chunk size mismatch");
+            //   Serial.print(idx); Serial.print(" "); Serial.print(chunk_size); Serial.print(" "); Serial.print(fb_i);
+            // }
+            fb_i = idx * chunk_size;
+            memcpy(&fb[fb_i], &recvData[8], chunk_size);  //chunk_size should be same as recvLength - 8 but not leaving anything to chance
+          break;
+          case 0x26: //last chunk of data was received, reset buffer pointer, display image
+            // Serial.println("FINAL CHUNK");
+            idx = recvData[1];  //seq num of this packet
+            chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+            fb_i = idx * chunk_size;
+            memcpy(&fb[fb_i], &recvData[8], recvLength - 8);
+            fb_i += recvLength - 8; //total length of image
+            if (isValidJPEG(fb, fb_i)) {
+              fbReady = true;
+              writefb = fb;
+              writefb_i = fb_i;
+            }
+            fb_i = 0;
+          break;
+          default:  //unknown packet type, don't respond
+            Serial.println("Unknownpacket");
+          break;
+
+        } //end of switchcase
+    });
+  udp.write(0x01);
+  }
+}   //handleUDPClient
+
+
 //init the button positions (will likely keep them transparent in final UX but unsure, aka don't actually redraw them during loop)
 void drawButtons() {
   uint16_t bWidth = 50;
   uint16_t bHeight = 50;
   // Generate buttons with different size X deltas
-  for (int i = 0; i < 2; i++) {
-    key[i].initButton(&tft,
-                      bWidth * 3 / 2 + i * (screenWidth - 3 * bWidth),
-                      bHeight * 3 / 2,
-                      bWidth,
-                      bHeight,
-                      TFT_WHITE,  // Outline
-                      TFT_GREEN,  // Fill
-                      TFT_BLACK,  // Text
-                      "Hello",
-                      1);
 
-    key[i].drawButton(false, String(i + 1));
+  //pan left and right will be 150x50
+  //tilt up and down will be 50x200
+  //take photo will be top left for now
+
+  uint16_t sH = screenHeight;   //for aligning it down below, no other reason
+  uint16_t sW = screenWidth;
+
+  uint16_t LRw = 50;      //    up/down/left/right button dimensions
+  uint16_t LRh = 140;
+  uint16_t UDw = 220;     // 320 - 100 = 220 (assumes mW = 50)
+  uint16_t UDh = 50;
+
+  uint16_t tiW = 30;    //height and width of the "tiny" buttons
+  uint16_t tiH = 30;    //this will be connection mode, sleep, and getData
+  uint16_t tiS = tiW + 5;     //spacing between them
+
+  uint16_t mW = 50;     //height and width of "medium buttons" (these will go in the corners)
+  uint16_t mH = 50;     //top two are photo and video mode select, bottom two are shutter on and shutter off
+
+
+  //char* names[] =        {"G",       "I",      "D",      "left",      "right",      "up",      "down",      "shutter",      "endVideo",      "photoMode",     "videoMode",     "sleep",     "getData"};
+  uint16_t bxs[] =       {2*tiS,     3*tiS,    4*tiS,      0,         sW-LRw,        50,         50,          0,              sW-mW,             1,              sW-mW,          5*tiS,       6*tiS };     //left of button
+  uint16_t bys[] =       {60,         60,       60,       50,           50,           0,        sH-UDh,      sH-mH,           sH-mH,             1,                 0,            60,           60  };     //top of button
+  uint16_t bWidths[] =   {tiW,        tiW,     tiW,       LRw,          LRw,         200,        200,         50,              mW,               mW,               mW,            tiW,          tiW };     //width of button
+  uint16_t bHeights[] =  {tiH,        tiH,     tiH,       LRh,          LRh,         50,         50,          50,              mW,               mW,               mW,            tiW,          tiW };     //height of button
+
+  uint16_t bOutlines[] = {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_WHITE,        TFT_WHITE,       TFT_WHITE,      TFT_WHITE,     TFT_WHITE};
+  uint16_t bFill[] =     {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_BLACK,   TFT_BLACK,  TFT_BLACK,   TFT_BLACK,    TFT_PURPLE,    TFT_CYAN,         TFT_ORANGE,      TFT_YELLOW,     TFT_YELLOW,    TFT_PURPLE};
+  uint16_t bText[] =     {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_BLACK,        TFT_WHITE,       TFT_BLACK,      TFT_BLACK,     TFT_WHITE};
+
+  char* names[] =        {"G",       "I",      "D",      "LEFT",      "RIGHT",      "UP",      "DOWN",      "SHUTTER",      "ENDVIDEO",      "PHOTO",          "VIDEO",         "SLEEP",      "DATA"};
+                   //      0          1         2           3            4            5           6             7               8                 9                10             11             12
+                   //    {0x11,      0x12,     0x13,      0x21,        0x22,         0x23,      0x24,         0x31,           0x32,             0x33,            0x34,           0x40,          0x41}
+
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    key[i].initButtonUL(&tft,
+                      bxs[i],
+                      bys[i],
+                      bWidths[i],
+                      bHeights[i],
+                      bOutlines[i],  // Outline
+                      bFill[i],    // Fill
+                      bText[i],  // Text
+                      names[i],
+                      1);
+    key[i].drawButton(false, names[i]);
   }
 }
 
@@ -529,7 +685,6 @@ void drawButtons() {
 void printTouchToDisplay(TouchPoint p) {
 
   // Clear screen first
-  //tft.fillScreen(TFT_BLACK);
   tft.fillRect(screenWidth/4, screenHeight/3+5, screenWidth/2, screenHeight/2-10, TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
@@ -553,7 +708,6 @@ void printTouchToDisplay(TouchPoint p) {
   tft.drawCentreString(temp, x, y, fontSize);
 }
 
-
 void printTouchToSerial(TouchPoint p) {
   Serial.print("Pressure = ");
   Serial.print(p.zRaw);
@@ -566,26 +720,34 @@ void printTouchToSerial(TouchPoint p) {
 
 //this takes in a number and transmits the proper signal to the controller (currently using UDP, might switch to TCP if necessary)
 //will rely on each individual button to debounce itself (alternative is a global debounce timer)
-void handleButtonPress(int button) {
-  if (!screenReady) return;   //this shouldn't even be possible but just in case
+void handleButtonPress(uint8_t button) {
+  if (!screenReady) return;   //this shouldn't even be possible since there are no buttons drawn until it's ready but just in case
 
-  // //                |    connect  |     direction     |  camera | espcontrol
+  // //                     |    connect  |     direction     |  camera | espcontrol
   // uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
-  // uint8_t tansCmdAmount = 11;
+  // uint8_t transCmdAmount = 11;
 
- 
-  if (!(0 <= button < cmdAmount)) {
+  if (!(0 <= button < transCmdAmount)) {
     Serial.println("Invalid button index passed");
     return;
   }
 
-  uint8_t byteToSend = transCmds[button];
+
+  if (button ==  0x11) {    //temp thing, delete later TODO                                                                           //////DELETE THIS SOONS
+     copyRAMintoFile(writefb, writefb_i, SPIFFS, PHOTO_URI);
+     return;
+  }
 
   //will send a 4-byte packet in the following format: (0xHH is the byteToSend)
   // {0x27,0x04,0xHH,0xHH}
-  //duplicating the data val in case it's corrupted
 
-
+  uint8_t byteToSend = transCmds[button];
+  uint8_t toSend[4];
+  toSend[0] = 0x27;
+  toSend[1] = 0x04;
+  toSend[2] = byteToSend;
+  toSend[3] = byteToSend;
+  udp.writeTo(toSend, 0x04, targetIP, targetPort);
 
 }
 
