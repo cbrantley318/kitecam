@@ -6,15 +6,14 @@
 **************************************************/
 
 #include <Arduino.h>
-#include <ESPNowCam.h>
+//#include <ESPNowCam.h>
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
 
-
 const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
-#define AP_MODE false
+#define AP_MODE true
 
 const int PRINT_SERVER_TO_SERIAL = 0;
 const int UDP_PORT = 1234;
@@ -26,7 +25,7 @@ uint16_t targetPort = 0;
 
 #include <FS.h>
 #include <SPIFFS.h>
-#include <Utils.h>
+//#include <Utils.h>
 #define FORMAT_SPIFFS_IF_FAILED true
 
 
@@ -73,6 +72,9 @@ TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button key[NUM_BUTTONS];
 bool screenReady = false;
 
+// recording variables - to handle logic for this more rigorously
+bool isPhotoMode = true;
+bool isRecording = false;
 
 //image frame buffer and size
 bool fbReady = false;
@@ -160,7 +162,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  // tft.invertDisplay(1);   //only include if using the other brand of display
+  tft.invertDisplay(1);   //only include if using the other brand of display
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -626,59 +628,80 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
 }   //handleUDPClient
 
 
-//init the button positions (will likely keep them transparent in final UX but unsure, aka don't actually redraw them during loop)
 void drawButtons() {
   uint16_t bWidth = 50;
   uint16_t bHeight = 50;
-  // Generate buttons with different size X deltas
-
-  //pan left and right will be 150x50
-  //tilt up and down will be 50x200
-  //take photo will be top left for now
-
-  uint16_t sH = screenHeight;   //for aligning it down below, no other reason
+  
+  uint16_t sH = screenHeight;
   uint16_t sW = screenWidth;
 
-  uint16_t LRw = 50;      //    up/down/left/right button dimensions
+  uint16_t LRw = 50;
   uint16_t LRh = 140;
-  uint16_t UDw = 220;     // 320 - 100 = 220 (assumes mW = 50)
+  uint16_t UDw = 220;
   uint16_t UDh = 50;
 
-  uint16_t tiW = 30;    //height and width of the "tiny" buttons
-  uint16_t tiH = 30;    //this will be connection mode, sleep, and getData
-  uint16_t tiS = tiW + 5;     //spacing between them
+  uint16_t mW = 50;
+  uint16_t mH = 50;
 
-  uint16_t mW = 50;     //height and width of "medium buttons" (these will go in the corners)
-  uint16_t mH = 50;     //top two are photo and video mode select, bottom two are shutter on and shutter off
+  // Directional chevrons
+  const char* chevrons[] = {"<", ">", "^", "v"}; // Left, Right, Up, Down
+  uint16_t chevronX[] = {0, sW-LRw, 50, 50};
+  uint16_t chevronY[] = {50, 50, 0, sH-UDh};
 
-
-  //char* names[] =        {"G",       "I",      "D",      "left",      "right",      "up",      "down",      "shutter",      "endVideo",      "photoMode",     "videoMode",     "sleep",     "getData"};
-  uint16_t bxs[] =       {2*tiS,     3*tiS,    4*tiS,      0,         sW-LRw,        50,         50,          0,              sW-mW,             1,              sW-mW,          5*tiS,       6*tiS };     //left of button
-  uint16_t bys[] =       {60,         60,       60,       50,           50,           0,        sH-UDh,      sH-mH,           sH-mH,             1,                 0,            60,           60  };     //top of button
-  uint16_t bWidths[] =   {tiW,        tiW,     tiW,       LRw,          LRw,         200,        200,         50,              mW,               mW,               mW,            tiW,          tiW };     //width of button
-  uint16_t bHeights[] =  {tiH,        tiH,     tiH,       LRh,          LRh,         50,         50,          50,              mW,               mW,               mW,            tiW,          tiW };     //height of button
-
-  uint16_t bOutlines[] = {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_WHITE,        TFT_WHITE,       TFT_WHITE,      TFT_WHITE,     TFT_WHITE};
-  uint16_t bFill[] =     {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_BLACK,   TFT_BLACK,  TFT_BLACK,   TFT_BLACK,    TFT_PURPLE,    TFT_CYAN,         TFT_ORANGE,      TFT_YELLOW,     TFT_YELLOW,    TFT_PURPLE};
-  uint16_t bText[] =     {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_BLACK,        TFT_WHITE,       TFT_BLACK,      TFT_BLACK,     TFT_WHITE};
-
-  char* names[] =        {"G",       "I",      "D",      "LEFT",      "RIGHT",      "UP",      "DOWN",      "SHUTTER",      "ENDVIDEO",      "PHOTO",          "VIDEO",         "SLEEP",      "DATA"};
-                   //      0          1         2           3            4            5           6             7               8                 9                10             11             12
-                   //    {0x11,      0x12,     0x13,      0x21,        0x22,         0x23,      0x24,         0x31,           0x32,             0x33,            0x34,           0x40,          0x41}
-
-  for (int i = 0; i < NUM_BUTTONS; i++) {
+  // Draw directional buttons with chevrons
+  for (int i = 3; i < 7; i++) {
     key[i].initButtonUL(&tft,
-                      bxs[i],
-                      bys[i],
-                      bWidths[i],
-                      bHeights[i],
-                      bOutlines[i],  // Outline
-                      bFill[i],    // Fill
-                      bText[i],  // Text
-                      names[i],
-                      1);
-    key[i].drawButton(false, names[i]);
+                        chevronX[i],
+                        chevronY[i],
+                        (i < 2 ? LRw : UDw),  // Width
+                        (i < 2 ? LRh : UDh),  // Height
+                        TFT_BLACK,  // No Outline
+                        TFT_BLACK,  // Fill
+                        TFT_WHITE,  // Text
+                        (char*)chevrons[i],  // Cast to char*
+                        1);
+    key[i].drawButton(false, (char*)chevrons[i]);
   }
+
+  // Toggle button for photo/video mode
+  // TODO change to 9/10 signal
+  uint16_t toggleX = 0;
+  uint16_t toggleY = sH - mH;
+  char* modeText = (char*)(isPhotoMode ? "PHOTO" : "VIDEO");
+
+  key[4].initButtonUL(&tft,
+                      toggleX,
+                      toggleY,
+                      mW,
+                      mH,
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      modeText,  // Cast to char*
+                      1);
+  key[4].drawButton(false, modeText);
+
+  // Circular button for shutter/record
+  uint16_t shutterX = sW - mW;  // Top-left corner of the square
+  uint16_t shutterY = sH - mH;  // Top-left corner of the square
+  uint16_t shutterFill = isPhotoMode ? TFT_WHITE : TFT_RED;  // White for photo mode, Red for video mode
+
+  // Draw the circular button as a square with rounded corners
+  // TODO change to 7/8 signal
+  key[7].initButtonUL(&tft,
+                      shutterX,
+                      shutterY,
+                      mW,
+                      mH,
+                      TFT_BLACK,  // No Outline
+                      shutterFill,  // Fill
+                      TFT_BLACK,  // Text (optional)
+                      "",  // No text
+                      1);
+  key[7].drawButton(false, "");
+  
+  // Draw the outline of the circle inside the button to simulate a circular button
+  tft.drawCircle(shutterX + mW / 2, shutterY + mH / 2, mW / 2, TFT_BLACK); // Optional outline
 }
 
 //for debugging purposes
@@ -731,6 +754,9 @@ void handleButtonPress(uint8_t button) {
     Serial.println("Invalid button index passed");
     return;
   }
+
+  // TODO handle toggle button
+
 
 
   if (button ==  0x11) {    //temp thing, delete later TODO                                                                           //////DELETE THIS SOONS
