@@ -6,7 +6,7 @@
 **************************************************/
 
 #include <Arduino.h>
-#include <ESPNowCam.h>
+// #include <ESPNowCam.h>
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
