@@ -22,8 +22,9 @@ class TFT_eSPI_Button
   
   // Adjust text datum and x, y deltas
   void     setLabelDatum(int16_t x_delta, int16_t y_delta, uint8_t datum = MC_DATUM);
-  
+  void     setLabel(char* label);
   void     drawButton(bool inverted = false, String long_name = "");
+  void     drawFilledButton(bool inverted = false, String long_name = "");
   bool     contains(int16_t x, int16_t y);
 
   void     press(bool p);
