@@ -1,8 +1,9 @@
+
 /**************************************************
  * Cameran video Receiver
  * by Carson Brantley, Dylan Nguyen 
  * Copyright (C) 2024
-**************************************************/
+ **************************************************/
 
 #include <Arduino.h>
 //#include <ESPNowCam.h>
@@ -75,6 +76,7 @@ bool screenReady = false;
 bool isPhotoMode = true;
 bool isRecording = false;
 uint16_t shutterFill = TFT_WHITE;  // White for photo mode, Red for video mode
+uint16_t shutterOutline = TFT_BLACK;  // Black for photo mode, Red for video mode
 
 //image frame buffer and size
 bool fbReady = false;
@@ -120,8 +122,8 @@ void setup() {
 
 
   // frame buffer for image, it's kinda big so 
-    fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
-    fb[0] = 0;
+  fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
+  fb[0] = 0;
 
 
   // this is for initializing the on-chip file system (SPIFFS)
@@ -144,7 +146,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  tft.invertDisplay(0);   //only include if using the other brand of display
+  tft.invertDisplay(1);   //only include if using the other brand of display
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -171,7 +173,7 @@ int loopcount = 0;
 void loop() {
     if (fbReady) {
         fbReady = false;
-        drawImagefromRAM((const char*)writefb, writefb_i); // draws the photo
+        drawImagefromRAM((const char*)writefb, writefb_i); // Draws the photo
         frameCount++;
     }
   
@@ -189,44 +191,20 @@ void loop() {
         }
     }
 
+    // Draw all buttons and circles every frame
     for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
         if (key[i].justPressed()) {
-          handleButtonPress(i);
-          key[i].drawButton(true); // Draw button with pressed state
-        } else if (key[i].isPressed()){
-          key[i].drawButton(true); // Draw button with pressed state
+            handleButtonPress(i);
+            Serial.print(i);
+        }
+        if (i == 4) { // shutter button
+          key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
         } else {
-          key[i].drawButton(false); // Draw button with normal state
+          key[i].drawButton(key[i].isPressed()); // Draw button with current state
         }
     }
 
-    // *** Start of Shutter Button Update ***
-    // Determine the fill and outline colors based on the current mode
-    uint16_t currentFill = (isPhotoMode) ? TFT_WHITE : (isRecording ? TFT_RED : TFT_WHITE);
-    uint16_t outlineColor = (!isPhotoMode) ? TFT_RED : TFT_BLACK;
-
-    // Reinitialize the shutter button with updated colors
-    uint16_t shutterX = screenWidth - 50 - 10;  // Adjusted position
-    uint16_t shutterY = screenHeight - 50 - 10; // Adjusted position
-
-    key[4].initButtonUL(&tft,
-                        shutterX,
-                        shutterY,
-                        50,  // Width
-                        50,  // Height
-                        outlineColor,  // Outline color
-                        currentFill,  // Fill color
-                        TFT_BLACK,  // Text (optional)
-                        "",  // No text
-                        2); // Increased font size from 1 to 2
-    key[4].drawButton(false);
-
-    // Redraw the circle outline and fill
-    tft.fillCircle(shutterX + 25, shutterY + 25, 25, outlineColor); // Draw circle outline
-    tft.fillCircle(shutterX + 25, shutterY + 25, 22, currentFill); // Fill circle
-    // *** End of Shutter Button Update ***
-
-    delay(5);
+    delay(10);
 }//loop()
 
 void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
@@ -488,10 +466,10 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
 }   //handleUDPClient
 
 
-void initButtons() {
+void initButtons() { 
   uint16_t bWidth = 50;
   uint16_t bHeight = 50;
-  
+
   uint16_t sH = screenHeight;
   uint16_t sW = screenWidth;
 
@@ -507,14 +485,17 @@ void initButtons() {
   const char* chevrons[] = {"<", ">", "^", "v"}; // Left, Right, Up, Down
   uint16_t chevronX[] = {0, sW-LRw, 50, 50};
   uint16_t chevronY[] = {50, 50, 0, sH-UDh};
+  uint16_t chevWidth[] = {50, 50, 220, 220};
+  uint16_t chevHeight[] = {140, 140, 50, 50};
+
 
   // Draw directional buttons with chevrons
   for (int i = 0; i < 4; i++) {
     key[i].initButtonUL(&tft,
                         chevronX[i],
                         chevronY[i],
-                        (i < 2 ? LRw : UDw),  // Width
-                        (i < 2 ? LRh : UDh),  // Height
+                        chevWidth[i],  // Width
+                        chevHeight[i],  // Height
                         TFT_BLACK,  // No Outline
                         TFT_BLACK,  // Fill
                         TFT_WHITE,  // Text
@@ -524,37 +505,31 @@ void initButtons() {
   }
 
   // Circular button for shutter/record
-  uint16_t shutterX = sW - mW - 10;  // Top-left corner of the square
-  uint16_t shutterY = sH - mH - 10;  // Top-left corner of the square
+  uint16_t shutterX = sW - bWidth - 10;  // Top-left corner of the square
+  uint16_t shutterY = sH - bHeight - 10;  // Top-left corner of the square
 
-  // Draw the circular button as a square with rounded corners
-  // TODO change to 7/8 signal
   key[4].initButtonUL(&tft,
                       shutterX,
                       shutterY,
-                      mW,
-                      mH,
-                      TFT_BLACK,  // No Outline
+                      bWidth,
+                      bHeight,
+                      shutterOutline,  // No Outline
                       shutterFill,  // Fill
                       TFT_BLACK,  // Text (optional)
                       "",  // No text
                       1);
-  key[4].drawButton(false, "");
-  
-  // Draw the outline of the circle inside the button to simulate a circular button
-  tft.fillCircle(shutterX + mW / 2, shutterY + mH / 2, mW / 2, TFT_WHITE); // Optional outline
+  key[4].drawFilledButton(false, ""); // Changed to drawFilledButton
 
   // Toggle button for photo/video mode
-  // TODO change to 9/10 signal
   uint16_t toggleX = 0;
-  uint16_t toggleY = sH - mH;
+  uint16_t toggleY = sH - bHeight;
   char* modeText = (char*)(isPhotoMode ? "PHOTO" : "VIDEO");
 
   key[5].initButtonUL(&tft,
                       toggleX,
                       toggleY,
-                      mW,
-                      mH,
+                      bWidth,
+                      bHeight,
                       TFT_BLACK,  // No Outline
                       TFT_BLACK,  // Fill
                       TFT_WHITE,  // Text
@@ -638,16 +613,12 @@ void handleButtonPress(uint8_t button) {
   udp.writeTo(toSend, 0x04, targetIP, targetPort);
 }
 
-// Modify the updateShutterButton function to add a red outline in video mode
 void updateShutterButton() {
-    // Set the shutter button color based on the mode and recording status
     shutterFill = (!isPhotoMode && isRecording) ? TFT_RED : TFT_WHITE;
 
-    // Reinitialize the shutter button with the new fill color
     uint16_t shutterX = screenWidth - 50 - 10;  // Adjusted position
     uint16_t shutterY = screenHeight - 50 - 10; // Adjusted position
 
-    // Add a red outline if in video mode
     uint16_t outlineColor = (!isPhotoMode) ? TFT_RED : TFT_BLACK;
 
     key[4].initButtonUL(&tft,
@@ -660,11 +631,7 @@ void updateShutterButton() {
                         TFT_BLACK,  // Text (optional)
                         "",  // No text
                         1);
-    key[4].drawButton(false);
-
-    // Draw the outline of the circle inside the button to simulate a circular button
-    tft.fillCircle(shutterX + 25, shutterY + 25, 25, outlineColor); // Draw circle outline
-    tft.fillCircle(shutterX + 25, shutterY + 25, 22, shutterFill); // Fill circle
+    key[4].drawFilledButton(false, ""); // Changed to drawFilledButton
 }
 
 void updateModeButton() {
