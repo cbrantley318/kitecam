@@ -146,7 +146,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  tft.invertDisplay(1);   //only include if using the other brand of display
+  tft.invertDisplay(0);   //only include if using the other brand of display
   tft.startWrite();
   Serial.println("TFT initted");
 
