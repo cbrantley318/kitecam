@@ -1,8 +1,7 @@
 /**************************************************
- * ESPNowCam video Receiver
- * by @hpsaturn Copyright (C) 2024
- * This file is part ESP32S3 camera tests project:
- * https://github.com/hpsaturn/esp32s3-cam
+ * Cameran video Receiver
+ * by Carson Brantley, Dylan Nguyen 
+ * Copyright (C) 2024
 **************************************************/
 
 #include <Arduino.h>
@@ -121,8 +120,8 @@ void setup() {
 
 
   // frame buffer for image, it's kinda big so 
-  fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
-  fb[0] = 0;
+    fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
+    fb[0] = 0;
 
 
   // this is for initializing the on-chip file system (SPIFFS)
@@ -145,7 +144,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  tft.invertDisplay(1);   //only include if using the other brand of display
+  tft.invertDisplay(0);   //only include if using the other brand of display
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -172,7 +171,7 @@ int loopcount = 0;
 void loop() {
     if (fbReady) {
         fbReady = false;
-        drawImagefromRAM((const char*)writefb, writefb_i); // Draws the photo
+        drawImagefromRAM((const char*)writefb, writefb_i); // draws the photo
         frameCount++;
     }
   
@@ -190,23 +189,44 @@ void loop() {
         }
     }
 
-    // Draw all buttons and circles every frame
     for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
         if (key[i].justPressed()) {
-            handleButtonPress(i);
-            Serial.print(i);
+          handleButtonPress(i);
+          key[i].drawButton(true); // Draw button with pressed state
+        } else if (key[i].isPressed()){
+          key[i].drawButton(true); // Draw button with pressed state
+        } else {
+          key[i].drawButton(false); // Draw button with normal state
         }
-        key[i].drawButton(key[i].isPressed()); // Draw button with current state
     }
 
-    // Redraw the shutter button circle
+    // *** Start of Shutter Button Update ***
+    // Determine the fill and outline colors based on the current mode
+    uint16_t currentFill = (isPhotoMode) ? TFT_WHITE : (isRecording ? TFT_RED : TFT_WHITE);
+    uint16_t outlineColor = (!isPhotoMode) ? TFT_RED : TFT_BLACK;
+
+    // Reinitialize the shutter button with updated colors
     uint16_t shutterX = screenWidth - 50 - 10;  // Adjusted position
     uint16_t shutterY = screenHeight - 50 - 10; // Adjusted position
-    uint16_t outlineColor = (!isPhotoMode) ? TFT_RED : TFT_BLACK;
-    tft.fillCircle(shutterX + 25, shutterY + 25, 25, outlineColor); // Draw circle outline
-    tft.fillCircle(shutterX + 25, shutterY + 25, 22, shutterFill); // Fill circle
 
-    delay(10);
+    key[4].initButtonUL(&tft,
+                        shutterX,
+                        shutterY,
+                        50,  // Width
+                        50,  // Height
+                        outlineColor,  // Outline color
+                        currentFill,  // Fill color
+                        TFT_BLACK,  // Text (optional)
+                        "",  // No text
+                        2); // Increased font size from 1 to 2
+    key[4].drawButton(false);
+
+    // Redraw the circle outline and fill
+    tft.fillCircle(shutterX + 25, shutterY + 25, 25, outlineColor); // Draw circle outline
+    tft.fillCircle(shutterX + 25, shutterY + 25, 22, currentFill); // Fill circle
+    // *** End of Shutter Button Update ***
+
+    delay(5);
 }//loop()
 
 void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
@@ -499,7 +519,7 @@ void initButtons() {
                         TFT_BLACK,  // Fill
                         TFT_WHITE,  // Text
                         (char*)chevrons[i],  // Cast to char*
-                        1);
+                        2);
     key[i].drawButton(false, (char*)chevrons[i]);
   }
 
