@@ -67,7 +67,7 @@ int yMax = 3800;
 int screenHeight = TFT_HEIGHT;
 int screenWidth = TFT_WIDTH;
 
-const int NUM_BUTTONS = 6;
+const int NUM_BUTTONS = 7;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button key[NUM_BUTTONS];
 bool screenReady = false;
@@ -75,8 +75,12 @@ bool screenReady = false;
 // recording variables - to handle logic for this more rigorously
 bool isPhotoMode = true;
 bool isRecording = false;
+bool isConnected = false;
 uint16_t shutterFill = TFT_WHITE;  // White for photo mode, Red for video mode
 uint16_t shutterOutline = TFT_BLACK;  // Black for photo mode, Red for video mode
+bool blinkState = false; // To track the blinking state
+unsigned long lastBlinkTime = 0; // To track the last blink time
+const unsigned long blinkInterval = 500; // Blink interval in milliseconds
 
 //image frame buffer and size
 bool fbReady = false;
@@ -198,10 +202,15 @@ void loop() {
             Serial.print(i);
         }
         if (i == 4) { // shutter button
-          key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
+            key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
         } else {
-          key[i].drawButton(key[i].isPressed()); // Draw button with current state
+            key[i].drawButton(key[i].isPressed()); // Draw button with current state
         }
+    }
+
+    // Draw blinking red circle if recording
+    if (isRecording) {
+        drawBlinkingCircle();
     }
 
     delay(10);
@@ -488,7 +497,6 @@ void initButtons() {
   uint16_t chevWidth[] = {50, 50, 220, 220};
   uint16_t chevHeight[] = {140, 140, 50, 50};
 
-
   // Draw directional buttons with chevrons
   for (int i = 0; i < 4; i++) {
     key[i].initButtonUL(&tft,
@@ -536,6 +544,23 @@ void initButtons() {
                       modeText,  // Cast to char*
                       1);
   key[5].drawButton(false, modeText);
+
+  // New Connect/Disconnect button
+  uint16_t connectX = sW - 80;
+  uint16_t connectY = 10;
+  char* connectText = (char*)(isConnected ? "DISCON" : "CONNECT");
+
+  key[6].initButtonUL(&tft,
+                      connectX,
+                      connectY,
+                      80,
+                      bHeight,
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      connectText,  // Cast to char*
+                      1);
+  key[6].drawButton(false, connectText);
 }
 
 //for debugging purposes
@@ -605,6 +630,15 @@ void handleButtonPress(uint8_t button) {
       byteToSend = transCmds[7]; // switch to video
     }
     updateModeButton(); // Update the mode button text and redraw
+  } else if (button == 6) { // Connect/Disconnect button
+    if (isConnected) {
+      isConnected = false;
+      byteToSend = 0x40; // disconnect
+    } else {
+      isConnected = true;
+      byteToSend = 0x11; // connect
+    }
+    updateConnectButton(); // Update the connect button text and redraw
   }
 
   updateShutterButton(); // Update the shutter button color and redraw
@@ -651,5 +685,36 @@ void updateModeButton() {
   key[5].drawButton(false);
 }
 
+void drawBlinkingCircle() {
+    // Clear the previous circle
+    tft.fillCircle(10, 10, 5, TFT_BLACK); // Clear the circle area
 
+    // Update blink state based on time 
+    if (millis() - lastBlinkTime >= blinkInterval) {
+        blinkState = !blinkState; // Toggle blink state
+        lastBlinkTime = millis(); // Update last blink time
+    }
 
+    // Draw the circle if blinkState is true
+    if (blinkState) {
+        tft.fillCircle(10, 10, 5, TFT_RED); // Draw the red circle
+    }
+}
+
+// Update the connect button
+void updateConnectButton() {
+  const char* connectText = isConnected ? "DISCONNECT" : "CONNECT";
+  
+  // Reinitialize the button with the new label
+  key[6].initButtonUL(&tft,
+                      screenWidth - 80,  // X position
+                      10,  // Y position
+                      80,  // Width
+                      50,  // Height
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      (char*)connectText,  // Cast to char*
+                      1);
+  key[6].drawButton(false);
+}
