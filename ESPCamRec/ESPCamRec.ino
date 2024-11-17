@@ -201,6 +201,10 @@ void loop() {
             handleButtonPress(i);
             Serial.print(i);
         }
+        if ((i < 4) && key[i].isPressed()){
+            handleButtonPress(i);
+            Serial.print(i);
+        }
         if (i == 4) { // shutter button
             key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
         } else {
