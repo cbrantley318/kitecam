@@ -55,17 +55,17 @@ long onTime = 0;
 bool panning = false;
 const int PAN_TIMEOUT = 50;
 // -------------------- Gimbal config -----------------------------
-const int rollServoPin = 25;
+const int rollServoPin = 24;
 Servo rollServo;
 int rollServoCurrentAngle = 90; 
 
-const int pitchServoPin = 5;
+const int pitchServoPin = 25;
 Servo pitchServo;
 int pitchServoCurrentAngle = 90; 
 
 const int servoMin = 0;
 const int servoMax = 180;
-const int stepSize = 2; //this is how much the pwm value changes in us
+const int stepSize = 5; //this is how much the pwm value changes in us
 
 
 
@@ -87,7 +87,7 @@ void setup() {
     pitchServo.attach(pitchServoPin, 500, 2400);  // Attach servo with specified min and max pulse widths
     pitchServo.write(pitchServoCurrentAngle);      // Set initial servo position
     rollServo.attach(rollServoPin, 500, 2400);  // Attach servo with specified min and max pulse widths
-    rollServo.write(rollServoCurrentAngle);      // Set initial servo position
+    // rollServo.write(rollServoCurrentAngle);      // Set initial servo position
 
     delay(100);
 
@@ -162,10 +162,10 @@ void handleSerialCommand(char cmd) {
       panning = false;
       break;
     case 'u':   //tilt up
-      adjustServoAngle(pitchServo, pitchServoCurrentAngle, -1*stepSize);
+      adjustServoAngle(pitchServo, pitchServoCurrentAngle, 1*stepSize);
       break;
     case 'd':   //tilt down
-      adjustServoAngle(pitchServo, pitchServoCurrentAngle, 1*stepSize);
+      adjustServoAngle(pitchServo, pitchServoCurrentAngle, -1*stepSize);
       break;
 
     //gopro cmds
