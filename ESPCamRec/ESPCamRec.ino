@@ -1,32 +1,31 @@
+
 /**************************************************
- * ESPNowCam video Receiver
- * by @hpsaturn Copyright (C) 2024
- * This file is part ESP32S3 camera tests project:
- * https://github.com/hpsaturn/esp32s3-cam
-**************************************************/
+ * Cameran video Receiver
+ * by Carson Brantley, Dylan Nguyen 
+ * Copyright (C) 2024
+ **************************************************/
 
 #include <Arduino.h>
-// #include <ESPNowCam.h>
+//#include <ESPNowCam.h>
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
 
-
 const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
-#define AP_MODE false
+#define AP_MODE true
 
 const int PRINT_SERVER_TO_SERIAL = 0;
 const int UDP_PORT = 1234;
 AsyncUDP udp;
 
-IPAddress targetIP = IPAddress(192,168,4,2);
+IPAddress targetIP = IPAddress(192,168,4,1);
 uint16_t targetPort = 0;
 
 
 #include <FS.h>
 #include <SPIFFS.h>
-#include <Utils.h>
+//#include <Utils.h>
 #define FORMAT_SPIFFS_IF_FAILED true
 
 
@@ -68,11 +67,20 @@ int yMax = 3800;
 int screenHeight = TFT_HEIGHT;
 int screenWidth = TFT_WIDTH;
 
-const int NUM_BUTTONS = 13;
+const int NUM_BUTTONS = 7;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button key[NUM_BUTTONS];
 bool screenReady = false;
 
+// recording variables - to handle logic for this more rigorously
+bool isPhotoMode = true;
+bool isRecording = false;
+bool isConnected = false;
+uint16_t shutterFill = TFT_WHITE;  // White for photo mode, Red for video mode
+uint16_t shutterOutline = TFT_BLACK;  // Black for photo mode, Red for video mode
+bool blinkState = false; // To track the blinking state
+unsigned long lastBlinkTime = 0; // To track the last blink time
+const unsigned long blinkInterval = 500; // Blink interval in milliseconds
 
 //image frame buffer and size
 bool fbReady = false;
@@ -91,30 +99,12 @@ int idx = 0;
 uint32_t chunk_size = 0;
 uint8_t ack = 0x01;
 
-
-
-//the list of buttons available (or joystick inputs) are as follows (not in order): 
-/*
-  btn0: connect to gopro                  \
-  btn1: connect to iphone                  >  0x1X
-  btn2: connect to android                /
-  btn3: pan left                          \
-  btn4: pan right                          \ 0x2X
-  btn5: tilt up                            /
-  btn6: tilt down                         /
-  btn7: take photo                        \
-  bn8: stop video                          \
-  btn9: video mode                         / 0x3X
-  btn10: photo mode                       /
-  btn11: TBD
-  btn12: request data sent back (sends back all data)     > 0x4X
-
-*/    
-
 //control signals to transmit
 //                     |    connect  |     direction     |  camera | espcontrol
 // uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
-uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x33,0x34,0x40,0x41};
+// new
+// ^: 0x21, v: 0x22, <: 0x23, >: 0x24, SHUTTER: 0x31, ENDVID: 0x32, PHOTO: 0x33, VIDEO: 0x34
+uint8_t transCmds[] = {0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33, 0x34};
 uint8_t transCmdAmount = 11;
 
 
@@ -160,7 +150,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  // tft.invertDisplay(1);   //only include if using the other brand of display
+  tft.invertDisplay(1);   //only include if using the version with USB-C
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -177,7 +167,7 @@ void setup() {
   // tft.drawCentreString("Hello___Touch Screen to Start____There", x, y, fontSize);
   y +=30;
   // tft.drawCentreString("General__Touch Screen to Start__Kenobi", x, y, fontSize);
-  drawButtons();
+  initButtons();
   screenReady = true;
   delay(1000);
 } //setup
@@ -185,47 +175,46 @@ void setup() {
 
 int loopcount = 0;
 void loop() {
-
-  if (fbReady) {      //all of the display commands will be done in this thread to avoid badness 
-    fbReady = false;
-    drawImagefromRAM((const char*) writefb, writefb_i);
-    tft.drawCentreString("got an image", 320/2, 195, 2);
-    tft.drawNumber(frameCount, 320/2, 210);
-    frameCount++;
-  }
+    if (fbReady) {
+        fbReady = false;
+        drawImagefromRAM((const char*)writefb, writefb_i); // Draws the photo
+        frameCount++;
+    }
   
-  //adding in code to register button presses, possibly (unless I can do it with interrupts / callbacks)
-  TouchPoint p = ts.getTouch();
-  if (p.zRaw > 100) {
-    // printTouchToSerial(p);
-    // printTouchToDisplay(p);
-  }
-  // printTouchToDisplay(p);
-
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    if ( p.zRaw > 100 && key[i].contains(p.x,p.y)) {
-        key[i].press(true);
-    } else {
-        key[i].press(false);
+    TouchPoint p = ts.getTouch();
+    if (p.zRaw > 100) {
+        // printTouchToSerial(p);
+        // printTouchToDisplay(p);
     }
-  }
 
-
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) { //this should actually only be for refreshing the display,
-    if (key[i].justPressed()) {
-      handleButtonPress(i);
-      key[i].drawButton(true);
-    } else if (key[i].justReleased()) {
-      key[i].drawButton(false);
+    for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+        if (p.zRaw > 100 && key[i].contains(p.x, p.y)) {
+            key[i].press(true);
+        } else {
+            key[i].press(false);
+        }
     }
-  }
 
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+    // Draw all buttons and circles every frame
+    for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+        if (key[i].justPressed()) {
+            handleButtonPress(i);
+            Serial.print(i);
+        }
+        if (i == 4) { // shutter button
+            key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
+        } else {
+            key[i].drawButton(key[i].isPressed()); // Draw button with current state
+        }
+    }
 
-  }
+    // Draw blinking red circle if recording
+    if (isRecording) {
+        drawBlinkingCircle();
+    }
 
-  delay(10);
-}//loop();
+    delay(10);
+}//loop()
 
 void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
     // Serial.printf("Reading file: %s\r\n", path);
@@ -243,155 +232,15 @@ void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
       file.close();
 }
 
-//stuff for SPIFFS
-
-/*
-void listDir(fs::FS &fs, const char * dirname, uint8_t levels){
-    Serial.printf("Listing directory: %s\r\n", dirname);
-
-    File root = fs.open(dirname);
-    if(!root){
-        Serial.println("- failed to open directory");
-        return;
-    }
-    if(!root.isDirectory()){
-        Serial.println(" - not a directory");
-        return;
-    }
-
-    File file = root.openNextFile();
-    while(file){
-        if(file.isDirectory()){
-            Serial.print("  DIR : ");
-            Serial.println(file.name());
-            if(levels){
-                listDir(fs, file.path(), levels -1);
-            }
-        } else {
-            Serial.print("  FILE: ");
-            Serial.print(file.name());
-            Serial.print("\tSIZE: ");
-            Serial.println(file.size());
-        }
-        file = root.openNextFile();
-    }
-}
-
-void readFile(fs::FS &fs, const char * path){
-    Serial.printf("Reading file: %s\r\n", path);
-
-    File file = fs.open(path);
-    if(!file || file.isDirectory()){
-        Serial.println("- failed to open file for reading");
-        return;
-    }
-
-    Serial.println("- read from file:");
-    while(file.available()){
-        Serial.write(file.read());
-    }
-    file.close();
-}
-
-void copyFileintoRAM(uint8_t* dest, fs::FS &fs, const char * path){
-    Serial.printf("Reading file: %s\r\n", path);
-
-    File file = fs.open(path);
-    if(!file || file.isDirectory()){
-        Serial.println("- failed to open file for reading");
-        return;
-    }
-    Serial.println("- read from file:");
-    if(file.available()){
-        file.read(dest,BUF_SIZE);
-    }
-    Serial.println();
-    file.close();
-}
-
-*/ //end of comment block 1
-
-/*
-
-  // void writeFile(fs::FS &fs, const char * path, const char * message){
-  //     Serial.printf("Writing file: %s\r\n", path);
-
-  //     File file = fs.open(path, FILE_WRITE);
-  //     if(!file){
-  //         Serial.println("- failed to open file for writing");
-  //         return;
-  //     }
-  //     if(file.print(message)){
-  //         Serial.println("- file written");
-  //     } else {
-  //         Serial.println("- write failed");
-  //     }
-  //     file.close();
-  // }
-
-  // void appendFile(fs::FS &fs, const char * path, const char * message){
-  //     Serial.printf("Appending to file: %s\r\n", path);
-
-  //     File file = fs.open(path, FILE_APPEND);
-  //     if(!file){
-  //         Serial.println("- failed to open file for appending");
-  //         return;
-  //     }
-  //     if(file.print(message)){
-  //         Serial.println("- message appended");
-  //     } else {
-  //         Serial.println("- append failed");
-  //     }
-  //     file.close();
-  // }
-
-  // void renameFile(fs::FS &fs, const char * path1, const char * path2){
-  //     Serial.printf("Renaming file %s to %s\r\n", path1, path2);
-  //     if (fs.rename(path1, path2)) {
-  //         Serial.println("- file renamed");
-  //     } else {
-  //         Serial.println("- rename failed");
-  //     }
-  // }
-
-  // void deleteFile(fs::FS &fs, const char * path){
-  //     Serial.printf("Deleting file: %s\r\n", path);
-  //     if(fs.remove(path)){
-  //         Serial.println("- file deleted");
-  //     } else {
-  //         Serial.println("- delete failed");
-  //     }
-  // }
-
-  // int drawImagefromFile(const char *imageFileUri) {
-  //     unsigned long lTime = millis();
-  //     lTime = millis();
-  //     jpeg.open((const char *)imageFileUri, myOpen, myClose, myRead, mySeek, JPEGDraw);
-  //     jpeg.setPixelType(1);
-  //     int imagePosition = 320/2 - (150 / 2);
-  //     // decode will return 1 on sucess and 0 on a failure
-  //     int decodeStatus = jpeg.decode(imagePosition, 0, JPEG_SCALE_HALF);
-  //     // jpeg.decode(45, 0, 0);
-  //     jpeg.close();
-  //     Serial.print("Time taken to decode and display Image (ms): ");
-  //     Serial.println(millis() - lTime);
-
-  //     return decodeStatus;
-  // }
-
-*/
-
 int drawImagefromRAM(const char *imageBuffer, int size) {
     unsigned long lTime = millis();
     lTime = millis();
     jpeg.openRAM((uint8_t *)imageBuffer, size, JPEGDraw);
     jpeg.setPixelType(1);
-    int imagePositionX = 320/4;
-    int imagePositionY = 240/4;
-    // decode will return 1 on sucess and 0 on a failure
-    // int decodeStatus = jpeg.decode(0, 0, 0);                       //for full size display
-    int decodeStatus = jpeg.decode(imagePositionX, imagePositionY, JPEG_SCALE_HALF);   //for one-quarter size (half in each dimension)
-    // jpeg.decode(45, 0, 0);
+    int imagePositionX = 0;  // Start at the top-left corner
+    int imagePositionY = 0;  // Start at the top-left corner
+    // Decode the image at full size
+    int decodeStatus = jpeg.decode(imagePositionX, imagePositionY, 0);  // 0 means no scaling
     jpeg.close();
     // Serial.print("Time taken to decode and display Image (ms): ");
     // Serial.println(millis() - lTime);
@@ -526,12 +375,14 @@ void handleUDPServer() {   //for use by the screen (client and Access Point)
 
       if (packet.length() < 20) {
 
-        Serial.print("UDP Packet Type: ");  Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
-        Serial.print(", From: ");           Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
-        Serial.print(", To: ");             Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
-        Serial.print(", Length: ");         Serial.print(packet.length());    
-        Serial.print(", Data: ");           Serial.write(packet.data(), packet.length());   
-        Serial.println();
+        if (PRINT_SERVER_TO_SERIAL) { //this is just to clean up the serial monitor in case I don't want to print stuff
+          Serial.print("UDP Packet Type: ");  Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
+          Serial.print(", From: ");           Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
+          Serial.print(", To: ");             Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
+          Serial.print(", Length: ");         Serial.print(packet.length());    
+          Serial.print(", Data: ");           Serial.write(packet.data(), packet.length());   
+          Serial.println();
+        }
 
         //reply to the client
         // packet.printf("Got %u bytes of data", packet.length());
@@ -579,7 +430,7 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
           case 0x01: //initial message from camera
             targetIP = packet.remoteIP();
             targetPort = packet.remotePort();
-            udp.writeTo(&ack, 0x01, targetIP, targetPort);
+            // udp.writeTo(&ack, 0x01, targetIP, targetPort);
           break;
 
           case 0x11:  //contains camera data (i.e. numPhotosTaken, current position, current mode photo/video)
@@ -626,59 +477,92 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
 }   //handleUDPClient
 
 
-//init the button positions (will likely keep them transparent in final UX but unsure, aka don't actually redraw them during loop)
-void drawButtons() {
+void initButtons() { 
   uint16_t bWidth = 50;
   uint16_t bHeight = 50;
-  // Generate buttons with different size X deltas
 
-  //pan left and right will be 150x50
-  //tilt up and down will be 50x200
-  //take photo will be top left for now
-
-  uint16_t sH = screenHeight;   //for aligning it down below, no other reason
+  uint16_t sH = screenHeight;
   uint16_t sW = screenWidth;
 
-  uint16_t LRw = 50;      //    up/down/left/right button dimensions
+  uint16_t LRw = 50;
   uint16_t LRh = 140;
-  uint16_t UDw = 220;     // 320 - 100 = 220 (assumes mW = 50)
+  uint16_t UDw = 220;
   uint16_t UDh = 50;
 
-  uint16_t tiW = 30;    //height and width of the "tiny" buttons
-  uint16_t tiH = 30;    //this will be connection mode, sleep, and getData
-  uint16_t tiS = tiW + 5;     //spacing between them
+  uint16_t mW = 50;
+  uint16_t mH = 50;
 
-  uint16_t mW = 50;     //height and width of "medium buttons" (these will go in the corners)
-  uint16_t mH = 50;     //top two are photo and video mode select, bottom two are shutter on and shutter off
+  // Directional chevrons
+  const char* chevrons[] = {"<", ">", "^", "v"}; // Left, Right, Up, Down
+  uint16_t chevronX[] = {0, sW-LRw, 50, 50};
+  uint16_t chevronY[] = {50, 50, 0, sH-UDh};
+  uint16_t chevWidth[] = {50, 50, 220, 220};
+  uint16_t chevHeight[] = {140, 140, 50, 50};
 
-
-  //char* names[] =        {"G",       "I",      "D",      "left",      "right",      "up",      "down",      "shutter",      "endVideo",      "photoMode",     "videoMode",     "sleep",     "getData"};
-  uint16_t bxs[] =       {2*tiS,     3*tiS,    4*tiS,      0,         sW-LRw,        50,         50,          0,              sW-mW,             1,              sW-mW,          5*tiS,       6*tiS };     //left of button
-  uint16_t bys[] =       {60,         60,       60,       50,           50,           0,        sH-UDh,      sH-mH,           sH-mH,             1,                 0,            60,           60  };     //top of button
-  uint16_t bWidths[] =   {tiW,        tiW,     tiW,       LRw,          LRw,         200,        200,         50,              mW,               mW,               mW,            tiW,          tiW };     //width of button
-  uint16_t bHeights[] =  {tiH,        tiH,     tiH,       LRh,          LRh,         50,         50,          50,              mW,               mW,               mW,            tiW,          tiW };     //height of button
-
-  uint16_t bOutlines[] = {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_WHITE,        TFT_WHITE,       TFT_WHITE,      TFT_WHITE,     TFT_WHITE};
-  uint16_t bFill[] =     {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_BLACK,   TFT_BLACK,  TFT_BLACK,   TFT_BLACK,    TFT_PURPLE,    TFT_CYAN,         TFT_ORANGE,      TFT_YELLOW,     TFT_YELLOW,    TFT_PURPLE};
-  uint16_t bText[] =     {TFT_WHITE,TFT_WHITE,TFT_WHITE,TFT_WHITE,   TFT_WHITE,  TFT_WHITE,   TFT_WHITE,    TFT_WHITE,     TFT_BLACK,        TFT_WHITE,       TFT_BLACK,      TFT_BLACK,     TFT_WHITE};
-
-  char* names[] =        {"G",       "I",      "D",      "LEFT",      "RIGHT",      "UP",      "DOWN",      "SHUTTER",      "ENDVIDEO",      "PHOTO",          "VIDEO",         "SLEEP",      "DATA"};
-                   //      0          1         2           3            4            5           6             7               8                 9                10             11             12
-                   //    {0x11,      0x12,     0x13,      0x21,        0x22,         0x23,      0x24,         0x31,           0x32,             0x33,            0x34,           0x40,          0x41}
-
-  for (int i = 0; i < NUM_BUTTONS; i++) {
+  // Draw directional buttons with chevrons
+  for (int i = 0; i < 4; i++) {
     key[i].initButtonUL(&tft,
-                      bxs[i],
-                      bys[i],
-                      bWidths[i],
-                      bHeights[i],
-                      bOutlines[i],  // Outline
-                      bFill[i],    // Fill
-                      bText[i],  // Text
-                      names[i],
-                      1);
-    key[i].drawButton(false, names[i]);
+                        chevronX[i],
+                        chevronY[i],
+                        chevWidth[i],  // Width
+                        chevHeight[i],  // Height
+                        TFT_BLACK,  // No Outline
+                        TFT_BLACK,  // Fill
+                        TFT_WHITE,  // Text
+                        (char*)chevrons[i],  // Cast to char*
+                        2);
+    key[i].drawButton(false, (char*)chevrons[i]);
   }
+
+  // Circular button for shutter/record
+  uint16_t shutterX = sW - bWidth - 10;  // Top-left corner of the square
+  uint16_t shutterY = sH - bHeight - 10;  // Top-left corner of the square
+
+  key[4].initButtonUL(&tft,
+                      shutterX,
+                      shutterY,
+                      bWidth,
+                      bHeight,
+                      shutterOutline,  // No Outline
+                      shutterFill,  // Fill
+                      TFT_BLACK,  // Text (optional)
+                      "",  // No text
+                      1);
+  key[4].drawFilledButton(false, ""); // Changed to drawFilledButton
+
+  // Toggle button for photo/video mode
+  uint16_t toggleX = 0;
+  uint16_t toggleY = sH - bHeight;
+  char* modeText = (char*)(isPhotoMode ? "PHOTO" : "VIDEO");
+
+  key[5].initButtonUL(&tft,
+                      toggleX,
+                      toggleY,
+                      bWidth,
+                      bHeight,
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      modeText,  // Cast to char*
+                      1);
+  key[5].drawButton(false, modeText);
+
+  // New Connect/Disconnect button
+  uint16_t connectX = sW - 80;
+  uint16_t connectY = 10;
+  char* connectText = (char*)(isConnected ? "DISCON" : "CONNECT");
+
+  key[6].initButtonUL(&tft,
+                      connectX,
+                      connectY,
+                      80,
+                      bHeight,
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      connectText,  // Cast to char*
+                      1);
+  key[6].drawButton(false, connectText);
 }
 
 //for debugging purposes
@@ -721,37 +605,118 @@ void printTouchToSerial(TouchPoint p) {
 //this takes in a number and transmits the proper signal to the controller (currently using UDP, might switch to TCP if necessary)
 //will rely on each individual button to debounce itself (alternative is a global debounce timer)
 void handleButtonPress(uint8_t button) {
-  if (!screenReady) return;   //this shouldn't even be possible since there are no buttons drawn until it's ready but just in case
+  if (!screenReady) return;
 
-  // //                     |    connect  |     direction     |  camera | espcontrol
-  // uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
-  // uint8_t transCmdAmount = 11;
-
-  if (!(0 <= button < transCmdAmount)) {
-    Serial.println("Invalid button index passed");
-    return;
+  uint8_t byteToSend;
+  if (button < 4) {
+    byteToSend = transCmds[button];
+  } else if (button == 4) { // shutter button pressed
+    if (isPhotoMode) {
+      byteToSend = transCmds[4]; // shutter photo
+    } else if (!isPhotoMode && isRecording) {
+      isRecording = false;
+      byteToSend = transCmds[5]; // end video
+    } else if (!isPhotoMode && !isRecording) { // start recording
+      isRecording = true;
+      byteToSend = transCmds[4]; // start video
+    }
+  } else if (button == 5) { // photo/video mode toggle
+    if (!isPhotoMode && !isRecording) {
+      isPhotoMode = true;
+      byteToSend = transCmds[6]; // switch to photo
+    } else if (!isPhotoMode && isRecording) {
+      isRecording = false;
+      byteToSend = transCmds[5]; // end video
+    } else if (isPhotoMode) {
+      isPhotoMode = false;
+      byteToSend = transCmds[7]; // switch to video
+    }
+    updateModeButton(); // Update the mode button text and redraw
+  } else if (button == 6) { // Connect/Disconnect button
+    if (isConnected) {
+      isConnected = false;
+      byteToSend = 0x40; // disconnect
+    } else {
+      isConnected = true;
+      byteToSend = 0x11; // connect
+    }
+    updateConnectButton(); // Update the connect button text and redraw
   }
 
+  updateShutterButton(); // Update the shutter button color and redraw
 
-  if (button ==  0x11) {    //temp thing, delete later TODO                                                                           //////DELETE THIS SOONS
-     copyRAMintoFile(writefb, writefb_i, SPIFFS, PHOTO_URI);
-     return;
-  }
-
-  //will send a 4-byte packet in the following format: (0xHH is the byteToSend)
-  // {0x27,0x04,0xHH,0xHH}
-
-  uint8_t byteToSend = transCmds[button];
-  uint8_t toSend[4];
-  toSend[0] = 0x27;
-  toSend[1] = 0x04;
-  toSend[2] = byteToSend;
-  toSend[3] = byteToSend;
+  uint8_t toSend[4] = {0x27, 0x04, byteToSend, byteToSend};
   udp.writeTo(toSend, 0x04, targetIP, targetPort);
-
 }
 
+void updateShutterButton() {
+    shutterFill = (!isPhotoMode && isRecording) ? TFT_RED : TFT_WHITE;
 
+    uint16_t shutterX = screenWidth - 50 - 10;  // Adjusted position
+    uint16_t shutterY = screenHeight - 50 - 10; // Adjusted position
 
+    uint16_t outlineColor = (!isPhotoMode) ? TFT_RED : TFT_BLACK;
 
+    key[4].initButtonUL(&tft,
+                        shutterX,
+                        shutterY,
+                        50,  // Width
+                        50,  // Height
+                        outlineColor,  // Outline color
+                        shutterFill,  // New Fill Color
+                        TFT_BLACK,  // Text (optional)
+                        "",  // No text
+                        1);
+    key[4].drawFilledButton(false, ""); // Changed to drawFilledButton
+}
 
+void updateModeButton() {
+  const char* modeText = isPhotoMode ? "PHOTO" : "VIDEO";
+  
+  // Reinitialize the button with the new label
+  key[5].initButtonUL(&tft,
+                      0,  // X position
+                      screenHeight - 50,  // Y position
+                      50,  // Width
+                      50,  // Height
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      (char*)modeText,  // Cast to char*
+                      1);
+  key[5].drawButton(false);
+}
+
+void drawBlinkingCircle() {
+    // Clear the previous circle
+    tft.fillCircle(10, 10, 5, TFT_BLACK); // Clear the circle area
+
+    // Update blink state based on time 
+    if (millis() - lastBlinkTime >= blinkInterval) {
+        blinkState = !blinkState; // Toggle blink state
+        lastBlinkTime = millis(); // Update last blink time
+    }
+
+    // Draw the circle if blinkState is true
+    if (blinkState) {
+        tft.fillCircle(10, 10, 5, TFT_RED); // Draw the red circle
+    }
+}
+
+// Update the connect button
+void updateConnectButton() {
+  const char* connectText = isConnected ? "DISCONNECT" : "CONNECT";
+  
+  // Reinitialize the button with the new label
+  key[6].initButtonUL(&tft,
+                      screenWidth - 80,  // X position
+                      10,  // Y position
+                      80,  // Width
+                      50,  // Height
+                      TFT_BLACK,  // No Outline
+                      TFT_BLACK,  // Fill
+                      TFT_WHITE,  // Text
+                      (char*)connectText,  // Cast to char*
+                      1);
+  key[6].drawButton(false);
+}

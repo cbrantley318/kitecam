@@ -27,6 +27,7 @@
 
 static BLEDevice *ThisDevice;
 static BLEClient *ThisClient = ThisDevice->createClient();
+static BLEAdvertisedDevice* ClientAdvDev; 
 BLEScan *ThisScan = ThisDevice->getScan();
 static BLEUUID ServiceUUID((uint16_t)0xFEA6);
 static BLEUUID CommandWriteCharacteristicUUID("b5f90072-aa8d-11e3-9046-0002a5d5c51b");
@@ -46,58 +47,56 @@ char BLE_Sleep[] = {0x01, 0x05};
 char BLE_KeepAlive[] = {0x01, 0x5B};
 
 
-
-
 // -------------------- DC Motor config ---------------------------
 
 const int motor1pin1 = 14;
-const int motor1pin2 = 15;
+const int motor1pin2 = 27;
 long onTime = 0;
 bool panning = false;
+const int PAN_TIMEOUT = 50;
 // -------------------- Gimbal config -----------------------------
-const int rollServoPin = 12;
+const int rollServoPin = 25;
 Servo rollServo;
 int rollServoCurrentAngle = 90; 
 
-const int pitchServoPin = 2;
+const int pitchServoPin = 5;
 Servo pitchServo;
 int pitchServoCurrentAngle = 90; 
 
 const int servoMin = 0;
 const int servoMax = 180;
-const int stepSize = 5; //this is how much the pwm value changes in us
-const int PAN_TIMEOUT = 500;
+const int stepSize = 2; //this is how much the pwm value changes in us
 
 
 
 
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);    //Hardware Serial of ESP32
   while (!Serial) {
-    delay(1); // Wait for serial port to connect (only needed for native USB)
+    delay(10); // Wait for serial port to connect (only needed for native USB)
   }
 
     //init the motor pins
     pinMode(motor1pin1, OUTPUT);
     pinMode(motor1pin2, OUTPUT);
 
-    pinMode(pitchServoPin, OUTPUT);
 
     //init the gimbal controller (treat it like a servo)
+    pinMode(pitchServoPin, OUTPUT); //this is prbably not needed
     pitchServo.attach(pitchServoPin, 500, 2400);  // Attach servo with specified min and max pulse widths
     pitchServo.write(pitchServoCurrentAngle);      // Set initial servo position
     rollServo.attach(rollServoPin, 500, 2400);  // Attach servo with specified min and max pulse widths
     rollServo.write(rollServoCurrentAngle);      // Set initial servo position
 
-    delay(200);
+    delay(100);
 
 
     // Init Bluetooth Low Energy
     ThisDevice->init("");
     ThisDevice->setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 
-    delay(500);
+    delay(200);
 
 
     if (ScanAndConnect()) {
@@ -109,6 +108,12 @@ void setup() {
 
 void loop() {
 
+
+  if (panning && (millis() - onTime) > PAN_TIMEOUT) { //sanity check, stop panning after a certain time unless we receive a new time update
+    // Serial.println("s_");
+    handleSerialCommand('s');
+  }
+
   if (Serial.available()>1) {
     //receive and act on one command at a time, speed doesn't matter here so this can be blocking
 
@@ -116,19 +121,17 @@ void loop() {
     if (!(inbound > 0x60 && inbound < 0x80)){ //in case we capture a newline first
       inbound = Serial.read();
     }
-    char inbound2 = Serial.read();
+    char inbound2 = Serial.read(); //we expect two back-to-back bytes sent for each command
     while (Serial.available() > 0) {
-      Serial.read();
+      Serial.readString(); //flush the serial buffer
     }
     // Serial.println(inbound);
     if (inbound == inbound2) {
-      Serial.println(inbound);
+      // Serial.println(inbound);
       handleSerialCommand(inbound);
     }
 
-    if (panning && (millis() - onTime) > PAN_TIMEOUT) { //sanity check, stop panning after a certain time unless we receive a new time update
-      handleSerialCommand('s');
-    }
+
   }
   
   delay(20);
@@ -178,6 +181,30 @@ void handleSerialCommand(char cmd) {
     case 'v':
       if (ItsOn) ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_ModeVideo, 4);
       break;
+    
+    //connect / disconnect from gopro
+    case 'c': //connect to the device if not already
+      if (ThisClient == 0) {
+        ItsOn = ScanAndConnect();
+        break;
+      }
+      if (ItsOn && !ThisClient->isConnected()) {
+        if (ThisClient->connect(ClientAdvDev)) {
+          Serial.write('w');
+          Serial.write('w');
+        } else {            //sending back whether or not we successfully connected (ESPcamTrans needs to then forward this along)
+          Serial.write('x');
+          Serial.write('x');
+        }
+      }
+    break;
+    case 'b': //disconnect to make room for the iPhone to connect to goPro
+      if (ItsOn && ThisClient && ThisClient->isConnected()) {
+        ThisClient->disconnect();
+        Serial.write('x');
+        Serial.write('x');
+      }
+      break;
     default:
       break;
   } //end of switch-case
@@ -191,7 +218,8 @@ bool ScanAndConnect(void) {
     delay(20);
     if (ThisScan->getResults()->getDevice(i).haveServiceUUID() && ThisScan->getResults()->getDevice(i).isAdvertisingService(BLEUUID(ServiceUUID))) {
       ThisScan->stop();
-      ThisClient->connect(new BLEAdvertisedDevice(ThisScan->getResults()->getDevice(i)));
+      ClientAdvDev = new BLEAdvertisedDevice(ThisScan->getResults()->getDevice(i));
+      ThisClient->connect(ClientAdvDev);
       //Serial.println(ThisClient->toString());
       return true;
     }

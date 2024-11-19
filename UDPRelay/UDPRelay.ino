@@ -7,12 +7,13 @@ const int PRINT_SERVER_TO_SERIAL = 0;
 AsyncUDP udp;
 
 
-IPAddress client1IP = IPAddress(192,168,4,2);
+IPAddress client1IP = IPAddress(192,168,4,3);
 uint16_t client1Port = 1024;
-IPAddress client2IP = IPAddress(192,168,4,3);
+IPAddress client2IP = IPAddress(192,168,4,2);
 uint16_t client2Port = 1024;
 bool isCLient1 = true;  //this isn't needed
 const int UDP_PORT = 1234;
+int counter = 0;
 
 IPAddress targetIP;
 uint16_t targetPort;
@@ -21,7 +22,7 @@ uint8_t ack = 0x01;
 
 //goal is client 1 connects, it saves the client 1 IP and port, and then when client 2 connects it does the other
 void setup() {
-  Serial.begin(115200);
+  // Serial.begin(115200);
 
   createWifiAP();
   handleUDPServer();
@@ -30,11 +31,18 @@ void setup() {
 
 void loop() {
   delay(100);
-  if (Serial.available() > 0) {
-    Serial.readString();
-    Serial.print("Client 1: "); Serial.print(client1IP); Serial.print(", "); Serial.println(client1Port);
-    Serial.print("Client 2: "); Serial.print(client2IP); Serial.print(", "); Serial.println(client2Port);
+  // if (Serial.available() > 0) {
+  //   Serial.readString();
+  //   Serial.print("Client 1: "); Serial.print(client1IP); Serial.print(", "); Serial.println(client1Port);
+  //   Serial.print("Client 2: "); Serial.print(client2IP); Serial.print(", "); Serial.println(client2Port);
+  // }
+  if (counter >= 50) {
+    counter = -1;
+    udp.writeTo(&ack, 0x01, client1IP, client1Port);
+    udp.writeTo(&ack, 0x01, client2IP, client2Port);
+
   }
+  counter++;
 }
 
 void createWifiAP() {
@@ -44,14 +52,11 @@ void createWifiAP() {
       while (1);
     }
     IPAddress myIP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(myIP);
-
-    delay(5000);
-
-    int nums = WiFi.softAPgetStationNum();
-    Serial.print("Number of stations: ");
-    Serial.println(nums);
+    // Serial.print("AP IP address: ");
+    // Serial.println(myIP);
+    // int nums = WiFi.softAPgetStationNum();
+    // Serial.print("Number of stations: ");
+    // Serial.println(nums);
 }
 
 // void handleUDPServer() {
@@ -76,8 +81,8 @@ void createWifiAP() {
 
 void handleUDPServer() {   //this is the only server, it will accept packets from each client and it just forwards them to the other client
   if (udp.listen(WiFi.softAPIP(),UDP_PORT)) {
-    Serial.print("UDP listening on IP: ");
-    Serial.println(WiFi.softAPIP());
+    // Serial.print("UDP listening on IP: ");
+    // Serial.println(WiFi.softAPIP());
     udp.onPacket([](AsyncUDPPacket packet) {
 
       if (PRINT_SERVER_TO_SERIAL) { //this is just to clean up the serial monitor in case I don't want to print stuff

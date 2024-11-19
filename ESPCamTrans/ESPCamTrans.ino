@@ -13,7 +13,7 @@ const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
 const bool PRINT_CLIENT_TO_SERIAL = false;
 const int UDP_PORT = 1234;
-const int CHUNK_SIZE = 1024;  //fpr splitting the jpeg img
+const int CHUNK_SIZE = 512;  //fpr splitting the jpeg img
 const int HEADER_SIZE = 8;
 AsyncUDP udp;
 
@@ -29,7 +29,7 @@ bool screenConnected = false;
 
 // ground transceiver to camera signals
 //                     |    connect  |     direction     |  camera | espcontrol
-uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
+uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x40,0x41};
 uint8_t transCmdAmount = 11;
 
 
@@ -92,7 +92,7 @@ bool tryScan = false;
 
 //Serial global vars
 uint8_t UdpCmds[] = {0x11, 0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33, 0x34, 0x40, 0x41};
-char SerialCmds[] = {'c',  'l',  'r',  'u',   'd',  'n',  'f',  'p',  'v',   's', 'm'};
+char SerialCmds[] = {'c',  'l',  'r',  'u',   'd',  'n',  'f',  'p',  'v',  'b', 'm'};
 //                connect, left, right,up,  down, snap, endVid,photo,vidMode, sleep, M (data dump)
 
 
@@ -126,6 +126,13 @@ void setup() {
 
 void loop() {             //this is my current workaround for resource collision
 
+  if (!WiFi.isConnected()) {
+    WiFi.reconnect();
+    delay(3000);
+    if (!WiFi.isConnected()) {
+      WiFi.begin(ssid, password);
+    }
+  }
 
   if (screenConnected && !BLEhasAntenna) {
     processFrame();
@@ -135,36 +142,30 @@ void loop() {             //this is my current workaround for resource collision
     // actOnCommand(cmd);
     sendSerialCommand(cmd);
   }
-  // if (tryScan) {
-  //     // Serial.println("------------------------Starting scan---------------------------------------------------");
-  //     tryScan = false;
-  //     if (ScanAndConnect()) {
-  //       // Serial.println("Connected!");
-  //       ItsOn = true;
-  //       delay(100);
-  //       // Serial.println("done delay");
-  //     } else {
-  //       // Serial.println("Failed to connect");
-  //     }
-  //     BLEhasAntenna = false;
-  // }
-
+  delay(20);
 }
 
 void createWifiStation() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+  WiFi.setAutoReconnect(true);
   if (WiFi.waitForConnectResult() != WL_CONNECTED) {
     Serial.println("WiFi Failed");
     while (1) {
-      delay(1000);
+      delay(10000);
+      if (WiFi.isConnected()) {
+        break;
+      }
+      WiFi.begin(ssid,password);
     }
   }
+  Serial.println("WiFi Conected");
+  Serial.println(WiFi.localIP());
 }
 
 void handleUDPClient() {
   if (udp.connect(IPAddress(192, 168, 4, 1), UDP_PORT)) {
-    // Serial.print("UDP Connected");
+    Serial.print("UDP Conected");
     udp.onPacket([](AsyncUDPPacket packet) {
 
       if (BLEhasAntenna) { //attempt #1 at sharing the antenna w/o conflict
@@ -177,7 +178,7 @@ void handleUDPClient() {
 
       if (packet.length() < 4) return;
 
-      if (PRINT_CLIENT_TO_SERIAL) { //this is just to clean up the serial monitor in case I don't want to print stuff
+      if (PRINT_CLIENT_TO_SERIAL) {
         Serial.print("UDP Packet Type: "); Serial.print(packet.isBroadcast() ? "Broadcast" : packet.isMulticast() ? "Multicast" : "Unicast");
         Serial.print(", From: ");   Serial.print(packet.remoteIP());  Serial.print(":");        Serial.print(packet.remotePort());
         Serial.print(", To: ");     Serial.print(packet.localIP());   Serial.print(":");        Serial.print(packet.localPort());
@@ -190,13 +191,13 @@ void handleUDPClient() {
       if (length >= 4) {
         switch(recvData[0]) {
 
-          case 0x03:
-            packet.println("received number 3");
-          break;
+          // case 0x03:
+          //   packet.println("received number 3");
+          // break;
 
-          case 0x04:
-            packet.println("received number 4");
-          break;
+          // case 0x04:
+          //   packet.println("received number 4");
+          // break;
           case 0x27:  //command incoming from the ground
             if (recvData[1] != 0x04) {   //not a valid command
               packet.println("Invalid command sent from ground");
@@ -204,7 +205,7 @@ void handleUDPClient() {
             }
 
             if (recvData[2] != recvData[3]) {
-              udp.print("command wasnt duplicated");
+              udp.print("comand wasnt duplicated");
               // udp.writeTo("command was not duplicated",screenIP,screenPort);
             }
             cmd = recvData[2];
@@ -214,7 +215,6 @@ void handleUDPClient() {
 
           default:
             packet.printf("Camera says try another command\n");
-
             for (int i = 0; i < packet.length(); i++) {
               packet.printf("%s", recvData);
               break;
@@ -230,7 +230,6 @@ void handleUDPClient() {
 
 void processFrame() {
 
-  if (BLEhasAntenna) return;
   if (Camera.get()) {
     uint8_t *out_jpg = NULL;
     size_t out_jpg_len = 0;
@@ -300,30 +299,6 @@ void processFrame() {
     // Serial.println("Cam NO image");
   }
 }
-
-// bool ScanAndConnect(void) {
-//   // vTaskSuskpendAll();
-//   // Serial.println("Start of scanandconn");
-//   ThisScan->clearResults();
-//   // Serial.println("\n____________________________________________cleared results--------------\n");
-//   ThisScan->start(3);
-//   // Serial.println("ran the scan-------------------------------------<<<<<<<");
-//   for (int i = 0; i < ThisScan->getResults()->getCount(); i++) {
-//     delay(20);
-//     if (ThisScan->getResults()->getDevice(i).haveServiceUUID() && ThisScan->getResults()->getDevice(i).isAdvertisingService(BLEUUID(ServiceUUID))) {
-//       ThisScan->stop();
-//       ThisClient->connect(new BLEAdvertisedDevice(ThisScan->getResults()->getDevice(i)));
-//       Serial.println(ThisClient->toString());
-//       Serial.println("About to return from scan");
-
-//       Serial.println(WiFi.isConnected());
-//       Serial.println("Just checking");
-//       return true;
-//     }
-//   }
-//   return false;
-// }
-
 
 // void actOnCommand(uint8_t cmd) {
 
