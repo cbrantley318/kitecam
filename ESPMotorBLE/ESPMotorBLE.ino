@@ -51,9 +51,11 @@ char BLE_KeepAlive[] = {0x01, 0x5B};
 
 const int motor1pin1 = 14;
 const int motor1pin2 = 27;
+const int motor1pin2follower = 26; //this is a software fix to a hardware bug (soldered two pins together so forcing 26 to follow 27)
 long onTime = 0;
 bool panning = false;
-const int PAN_TIMEOUT = 50;
+const int PAN_TIMEOUT = 250;
+const uint8_t MOTOR_SPEED = 10; //a number in range 0 - 255;
 // -------------------- Gimbal config -----------------------------
 const int rollServoPin = 24;
 Servo rollServo;
@@ -65,11 +67,9 @@ int pitchServoCurrentAngle = 90;
 
 const int servoMin = 0;
 const int servoMax = 180;
-const int stepSize = 5; //this is how much the pwm value changes in us
+const int stepSize = 2; //this is how much the pwm value changes in us
 
-
-
-
+char lastInbound = 0;
 
 void setup() {
   Serial.begin(115200);    //Hardware Serial of ESP32
@@ -80,7 +80,7 @@ void setup() {
     //init the motor pins
     pinMode(motor1pin1, OUTPUT);
     pinMode(motor1pin2, OUTPUT);
-
+    pinMode(motor1pin2follower, OUTPUT);
 
     //init the gimbal controller (treat it like a servo)
     pinMode(pitchServoPin, OUTPUT); //this is prbably not needed
@@ -91,74 +91,59 @@ void setup() {
 
     delay(100);
 
-
     // Init Bluetooth Low Energy
     ThisDevice->init("");
     ThisDevice->setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 
     delay(200);
 
-
     if (ScanAndConnect()) {
       ItsOn = true;
     }
-
-
 }
 
 void loop() {
-
 
   if (panning && (millis() - onTime) > PAN_TIMEOUT) { //sanity check, stop panning after a certain time unless we receive a new time update
     // Serial.println("s_");
     handleSerialCommand('s');
   }
 
-  if (Serial.available()>1) {
-    //receive and act on one command at a time, speed doesn't matter here so this can be blocking
-
+  if (Serial.available()>=1) {
     char inbound = Serial.read();
-    if (!(inbound > 0x60 && inbound < 0x80)){ //in case we capture a newline first
-      inbound = Serial.read();
-    }
-    char inbound2 = Serial.read(); //we expect two back-to-back bytes sent for each command
-    while (Serial.available() > 0) {
-      Serial.readString(); //flush the serial buffer
-    }
     // Serial.println(inbound);
-    if (inbound == inbound2) {
+    if (inbound == lastInbound) {
       // Serial.println(inbound);
-      handleSerialCommand(inbound);
+      handleSerialCommand(lastInbound);
+      inbound = 0;
+      delay(5);
     }
-
-
+    lastInbound = inbound;
   }
-  
-  delay(20);
-
 }
 
 //this handles servo directions, camera mode switch, and camera shutter on/off
 void handleSerialCommand(char cmd) {
-
   switch(cmd) {
-
     //motor controls / pan and tilt
     case 'l':
-      digitalWrite(motor1pin1, HIGH);
-      digitalWrite(motor1pin2, LOW);
+      analogWrite(motor1pin1, 100);
+      analogWrite(motor1pin2, 0);
+      analogWrite(motor1pin2follower, 0);
       onTime = millis();
       panning = true;
       break;
     case 'r':
-      digitalWrite(motor1pin1, LOW);
-      digitalWrite(motor1pin2, HIGH);
+      analogWrite(motor1pin1, 0);
+      analogWrite(motor1pin2, 100);
+      analogWrite(motor1pin2follower, 100);
       onTime = millis();
       panning = true;
       break;
     case 's':
-      digitalWrite(motor1pin1, LOW);
-      digitalWrite(motor1pin2, LOW);
+      analogWrite(motor1pin1, 0);
+      analogWrite(motor1pin2, 0);
+      analogWrite(motor1pin2follower, 0);
       panning = false;
       break;
     case 'u':   //tilt up

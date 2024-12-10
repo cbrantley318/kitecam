@@ -1,10 +1,18 @@
 #include <Arduino.h>
 #include <ESPNowCam.h>
-#include <drivers/CamAIThinker.h>
+#define CAM_IS_AI_THINKER
+#ifdef CAM_IS_AI_THINKER
+  #include <drivers/CamAIThinker.h>
+#else
+  #include <drivers/CamFreenoveWR.h>
+#endif
+
 #include "BLEDevice.h"
 #include <string.h>
 #include <esp_task_wdt.h>
 #include <ESP32Servo.h>
+
+// #define COMM_USING_UDP
 
 #include "WiFi.h"       //changing from ESPNow to bare UDP
 #include "AsyncUDP.h"
@@ -13,24 +21,34 @@ const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
 const bool PRINT_CLIENT_TO_SERIAL = false;
 const int UDP_PORT = 1234;
-const int CHUNK_SIZE = 512;  //fpr splitting the jpeg img
+const int CHUNK_SIZE = 240;  //fpr splitting the jpeg img
 const int HEADER_SIZE = 8;
 AsyncUDP udp;
-
-CamAIThinker Camera;
-const int JPEG_QUALITY = 49;
-// const int JPEG_QUALITY = 12；
+#ifdef CAM_IS_AI_THINKER
+  CamAIThinker Camera;
+#else
+  CamFreenoveWR Camera;
+#endif
+const int JPEG_QUALITY = 70;
+// const int JPEG_QUALITY = 12;
 
 //IP stuff
 IPAddress screenIP = IPAddress(192, 168, 4, 1);
 uint16_t screenPort = 1234;
 bool screenConnected = false;
 
+//ESP-NOW stuff
+// uint8_t broadcastAddress[] = {0x94, 0x54, 0xc5, 0xe7, 0x3c, 0xe0};
+uint8_t broadcastAddress[] = {0x08, 0xA6, 0xF7, 0x23, 0xB0, 0x10};
+esp_now_peer_info_t peerInfo;
+bool success = true;
+
+
 
 // ground transceiver to camera signals
 //                     |    connect  |     direction     |  camera | espcontrol
-uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x40,0x41};
-uint8_t transCmdAmount = 11;
+uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x40,0x41, 0x55};
+uint8_t transCmdAmount = 12;
 
 
 
@@ -91,9 +109,9 @@ bool tryScan = false;
 
 
 //Serial global vars
-uint8_t UdpCmds[] = {0x11, 0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33, 0x34, 0x40, 0x41};
-char SerialCmds[] = {'c',  'l',  'r',  'u',   'd',  'n',  'f',  'p',  'v',  'b', 'm'};
-//                connect, left, right,up,  down, snap, endVid,photo,vidMode, sleep, M (data dump)
+uint8_t UdpCmds[] = {0x11, 0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33, 0x34, 0x40, 0x41, 0x55};
+char SerialCmds[] = {'c',  'l',  'r',  'u',   'd',  'n',  'f',  'p',  'v',  'b', 'm', 's'};
+//                connect, left, right,up,  down, snap, endVid,photo,vidMode, sleep, M (data dump), Stop motors (s)
 
 
 void setup() {
@@ -109,23 +127,49 @@ void setup() {
     Serial.println(" degrees.");
     Serial.println(horizServoCurrentAngle);
   }
-
-
-  // Init Bluetooth Low Energy
-  // ThisDevice->init("");
-  // ThisDevice->setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
   
-  // CYD MAC address: 08:A6:F7:23:B0:10
-  uint8_t macRecv[6] = {0x08,0xA6,0xF7,0x23,0xB0,0x10};
-  createWifiStation();
-  handleUDPClient();
+
+  #ifdef COMM_USING_UDP
+    //UDP over WiFi communication
+    createWifiStation();
+    handleUDPClient();
+  #else
+    //ESP-NOW communication
+    Serial.println("ESP-NOW initing");
+      WiFi.mode(WIFI_STA);
+
+    // Init ESP-NOW
+    if (esp_now_init() != ESP_OK) {
+      Serial.println("Error initializing ESP-NOW");
+      return;
+    }
+
+    esp_now_register_send_cb(OnDataSent);
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 0;  
+    peerInfo.encrypt = false;
+    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+      Serial.println("Failed to add peer");
+      return;
+    }
+    // esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
+    esp_now_register_recv_cb(OnDataRecv);
+
+
+  #endif
+
+
+
   Camera.begin();
+  sensor_t * s = esp_camera_sensor_get();
+  s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
+  s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
   
-
 }
 
 void loop() {             //this is my current workaround for resource collision
 
+  #ifdef COMM_USING_UDP
   if (!WiFi.isConnected()) {
     WiFi.reconnect();
     delay(3000);
@@ -137,6 +181,11 @@ void loop() {             //this is my current workaround for resource collision
   if (screenConnected && !BLEhasAntenna) {
     processFrame();
   }
+  #else
+    processFrame();
+  #endif
+
+
   if (cmdRecvd) {
     cmdRecvd = false;
     // actOnCommand(cmd);
@@ -228,12 +277,56 @@ void handleUDPClient() {
   }
 }
 
+void OnDataRecv(const esp_now_recv_info_t* messageInfo, const uint8_t* incomingData, int len) {
+  uint8_t* recvData = (uint8_t*)incomingData;
+  int length = len;
+
+  if (len >= 4) {
+    switch(recvData[0]) {
+
+      // case 0x03:
+      //   packet.println("received number 3");
+      // break;
+      // case 0x04:
+      //   packet.println("received number 4");
+      // break;
+      case 0x27:  //command incoming from the ground
+        if (recvData[1] != 0x04) {   //not a valid command
+          return;
+        }
+
+        if (recvData[2] != recvData[3]) {
+          // udp.writeTo("command was not duplicated",screenIP,screenPort);
+        }
+        cmd = recvData[2];
+        cmdRecvd = true;
+      break;
+      default:
+      break;
+    }
+  }
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  return;
+  // Serial.print("\r\nLast Packet Send Status:\t");
+  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  if (status ==0){
+    success = true;
+  }
+  else{
+    success = false;
+  }
+}
+
 void processFrame() {
 
   if (Camera.get()) {
     uint8_t *out_jpg = NULL;
     size_t out_jpg_len = 0;
+
     frame2jpg(Camera.fb, JPEG_QUALITY, &out_jpg, &out_jpg_len);
+
     // radio.sendData(out_jpg, out_jpg_len);
     // udp.broadcast(out_jpg,out_jpg_len);
     // Serial.println("------------------------------------");
@@ -261,6 +354,14 @@ void processFrame() {
 
     for (int i = 0; i < num_iters; i++) {
 
+      #ifndef COMM_USING_UDP
+        while (!success) {
+          delay(5);
+        }
+        delay(5);
+
+      #endif
+
       outBuf[0] = 0x25;
       outBuf[1] = (uint8_t)i;
       if (i== num_iters -1) {
@@ -273,7 +374,13 @@ void processFrame() {
       // Serial.print("Outsize: ");
       // Serial.println(outSize);
       memcpy(&outBuf[8], &out_jpg[i*CHUNK_SIZE], outSize - HEADER_SIZE);
-      udp.writeTo(outBuf, outSize, screenIP, screenPort);
+
+      #ifdef COMM_USING_UDP
+        udp.writeTo(outBuf, outSize, screenIP, screenPort);
+      #else
+        esp_err_t result = esp_now_send(broadcastAddress, outBuf, outSize);
+        //send using esp-now
+      #endif
 
       // for (int i = 0; i < outSize; i++) {
       //   Serial.print(outBuf[i],HEX);
@@ -289,7 +396,6 @@ void processFrame() {
       // }
       // Serial.println();
 
-    // udp.writeTo(out_jpg, out_jpg_len, screenIP, screenPort);
     // Serial.print(out_jpg[0], HEX);Serial.print(out_jpg[1], HEX);Serial.print(" ");Serial.print(out_jpg[out_jpg_len-2], HEX);Serial.println(out_jpg[out_jpg_len-1], HEX);
     
     free(outBuf);
@@ -300,78 +406,11 @@ void processFrame() {
   }
 }
 
-// void actOnCommand(uint8_t cmd) {
-
-//   if (cmd == CMD_NONE) {
-//     return;
-//   }
-//     if (cmd < 11) {
-//       BLEhasAntenna = true;
-//     }
-
-//     switch(cmd) {
-    
-//     case 0x11: //Connect the camera (gopro)
-//       tryScan = true;
-//       BLEhasAntenna = true;
-//     break;
-//     case 0x33: //set to photo mode
-//         if (ItsOn) ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_ModePhoto, 4); //sending video mode
-//     break;
-//     case 0x34: //set to video mode
-//         if (ItsOn) ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_ModeVideo, 4); //sending video mode
-//     break;
-//     case 0x40: //tell it to sleep?
-//         if (ItsOn) ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_Sleep, 2); //sending sleep
-//     break;
-//     case 0x31: //shutter on (start the photo/video)
-//         if (ItsOn) ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_ShutterOn, 4);
-//     break;
-//     case 0x32: //shutter off (end video)
-//         if (!ItsOn) return; 
-//         ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_ShutterOff, 4);
-//         while (millis() - TimeStamp < 5000)
-//           yield();
-//         ServiceCharacteristic(ServiceUUID, CommandWriteCharacteristicUUID)->writeValue(BLE_Sleep, 2); //sending sleep
-//         ItsOn = false;
-//     break;
-
-//     //start of commands for moving servos / stepper (TODO)
-//     case 0x21:   //left
-//       adjustServoAngle(horizServo, horizServoCurrentAngle, -servoStep);
-      
-//     break;
-//     case 0x22:   //right
-//       adjustServoAngle(horizServo, horizServoCurrentAngle, servoStep);
-//     break;
-//     case 0x23:   //up
-//       adjustServoAngle(vertServo, vertServoCurrentAngle, -servoStep);
-//     break;
-//     case 0x24:   //down
-//       adjustServoAngle(vertServo, vertServoCurrentAngle, servoStep);
-//     break;
-//     //end of commands for moving motors     
-
-//     case 0x41:  //requesting a data dump be transmitted back to the ground (TODO)
-
-//     break;    
-//     default:
-//       Serial.println("Not a recognized command");
-//     break;
-//   }
-
-//   BLEhasAntenna = false;
-// }
-
 void sendSerialCommand(uint8_t cmd) {
-
-
   int idx = indexOf(cmd, UdpCmds, transCmdAmount);
   char toSend = SerialCmds[idx];
   Serial.write(toSend);
   Serial.write(toSend);
-
-
 }
 
 uint8_t indexOf(uint8_t target, uint8_t* arr, uint8_t size) {
@@ -380,25 +419,3 @@ uint8_t indexOf(uint8_t target, uint8_t* arr, uint8_t size) {
   }
   return -1;
 }
-
-// void adjustServoAngle(Servo& myServo, int &servoCurrentAngle, int delta) {
-//   int newAngle = servoCurrentAngle + delta;
-
-//   // Ensure the new angle is within the defined limits
-//   if (newAngle < servoMin) {
-//     newAngle = servoMin;
-//     Serial.println("Servo angle reached MIN limit.");
-//   } else if (newAngle > servoMax) {
-//     newAngle = servoMax;
-//     Serial.println("Servo angle reached MAX limit.");
-//   }
-
-//   // Update servo position if angle has changed
-//   if (newAngle != servoCurrentAngle) {
-//     servoCurrentAngle = newAngle;
-//     myServo.write(servoCurrentAngle);
-//     Serial.print("Servo angle adjusted to: ");
-//     Serial.print(servoCurrentAngle);
-//     Serial.println(" degrees.");
-//   }
-// }

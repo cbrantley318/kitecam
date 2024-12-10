@@ -5,52 +5,44 @@
  * Copyright (C) 2024
  **************************************************/
 
+// #define DEBOUNCE_BUTTON_TIMER
+#define AP_MODE true
+#define FORMAT_SPIFFS_IF_FAILED true
+// #define COMM_USING_UDP
+
 #include <Arduino.h>
 //#include <ESPNowCam.h>
+#include <esp_now.h>
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
 
 const char *ssid = "KiteCam";
 const char *password = "flykitesgB8iINPE_cDOaT6uarecool@";
-#define AP_MODE true
 
 const int PRINT_SERVER_TO_SERIAL = 0;
 const int UDP_PORT = 1234;
 AsyncUDP udp;
-
 IPAddress targetIP = IPAddress(192,168,4,1);
 uint16_t targetPort = 0;
-
 
 #include <FS.h>
 #include <SPIFFS.h>
 //#include <Utils.h>
-#define FORMAT_SPIFFS_IF_FAILED true
-
 
 #include <JPEGDEC.h>
-
 JPEGDEC jpeg;
 const char *PHOTO_URI = "/carson.jpg";
 const int BUF_SIZE = 16384;
-
-
 fs::File myfile;
 
 #include <SPI.h>
 #include <XPT2046_Bitbang.h>
 #include <TFT_eSPI.h>
 
-
 // ----------------------------
 // Touch Screen pins
 // ----------------------------
-
-// The CYD touch uses some non default
-// SPI pins
-
-#define XPT2046_IRQ 36
 #define XPT2046_MOSI 32
 #define XPT2046_MISO 39
 #define XPT2046_CLK 25
@@ -58,19 +50,27 @@ fs::File myfile;
 
 XPT2046_Bitbang ts(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS);
 
-//setting calibration constants 
+//setting TFT display stuff 
 int xMin = 200;
 int xMax = 3700;
 int yMin = 340;
 int yMax = 3800;
-
 int screenHeight = TFT_HEIGHT;
 int screenWidth = TFT_WIDTH;
 
+// Button inits
 const int NUM_BUTTONS = 7;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button key[NUM_BUTTONS];
 bool screenReady = false;
+uint64_t debounceTimer = 0;
+const uint32_t debounceDelay = 20; //in milliseconds, for the left and right arrow buttons
+
+//ESP-NOW stuff =------------------
+uint8_t broadcastAddress2[] = {0x2C, 0xBC, 0xBB, 0x83, 0x6B, 0x88}; // * camera for testing
+uint8_t broadcastAddress[] = {0xA0, 0xDD, 0x6C, 0xA2, 0x78, 0xB0}; // * camera on kite
+esp_now_peer_info_t peerInfo;
+
 
 // recording variables - to handle logic for this more rigorously
 bool isPhotoMode = true;
@@ -103,7 +103,7 @@ uint8_t ack = 0x01;
 //                     |    connect  |     direction     |  camera | espcontrol
 // uint8_t transCmds[] = {0x11,0x12,0x13,0x21,0x22,0x23,0x24,0x31,0x32,0x41     };
 // new
-// ^: 0x21, v: 0x22, <: 0x23, >: 0x24, SHUTTER: 0x31, ENDVID: 0x32, PHOTO: 0x33, VIDEO: 0x34
+// <: 0x21, >: 0x22, ^: 0x23, v: 0x24, SHUTTER: 0x31, ENDVID: 0x32, PHOTO: 0x33, VIDEO: 0x34
 uint8_t transCmds[] = {0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33, 0x34};
 uint8_t transCmdAmount = 11;
 
@@ -113,17 +113,38 @@ void setup() {
 
   delay(500);
 
-
-  if (AP_MODE) {
-    //AP MODE 
-    createWifiAP();     //the screen is the wifi AP and the server
-    handleUDPServer();  //the camera will be station and client (idk why but originally i had this as AP and client which was just bad)
-  } else {
-    //STATION MODE (using another as relay)
-    createWifiStation();
-    handleUDPClient();
-  }
-
+  #ifdef COMM_USING_UDP
+    if (AP_MODE) { //AP MODE 
+      createWifiAP();     //the screen is the wifi AP and the server
+      handleUDPServer();  //the camera will be station and client (idk why but originally i had this as AP and client which was just bad)
+    } else { //STATION MODE (using another as relay)
+      createWifiStation();
+      handleUDPClient();
+    }
+  #else
+    //ESP-NOW communication
+    WiFi.mode(WIFI_STA);
+    Serial.println("Initting ESP-NOW");
+    if (esp_now_init() != ESP_OK) {
+      Serial.println("Error initializing ESP-NOW");
+      return;
+    }
+    esp_now_register_send_cb(OnDataSent);
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 0;  
+    peerInfo.encrypt = false;
+    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+      Serial.println("Failed to add peer 1");
+      return;
+    }
+    memcpy(peerInfo.peer_addr, broadcastAddress2, 6);
+    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+      Serial.println("Failed to add peer 2");
+      return;
+    }
+    // esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv)); //deprecated version of function call
+    esp_now_register_recv_cb(OnDataRecv);
+  #endif
 
   // frame buffer for image, it's kinda big so 
   fb = (uint8_t*)  malloc(BUF_SIZE* sizeof( uint8_t ) ) ;
@@ -150,7 +171,7 @@ void setup() {
   //initialize the display
   tft.init();
   tft.setRotation(1);
-  tft.invertDisplay(1);   //only include if using the version with USB-C
+  // tft.invertDisplay(1);   //only include if using the version with USB-C
   tft.startWrite();
   Serial.println("TFT initted");
 
@@ -175,13 +196,13 @@ void setup() {
 
 int loopcount = 0;
 void loop() {
-    if (fbReady) {
+    if (fbReady) { //handling image display
         fbReady = false;
         drawImagefromRAM((const char*)writefb, writefb_i); // Draws the photo
         frameCount++;
     }
   
-    TouchPoint p = ts.getTouch();
+    TouchPoint p = ts.getTouch(); //only register valid touches (high enough pressure)
     if (p.zRaw > 100) {
         // printTouchToSerial(p);
         // printTouchToDisplay(p);
@@ -199,7 +220,7 @@ void loop() {
     for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
         if (key[i].justPressed()) {
             handleButtonPress(i);
-            Serial.print(i);
+            // Serial.print(i);
         }
         if (i == 4) { // shutter button
             key[i].drawFilledButton(key[i].isPressed()); // Draw button with current state
@@ -213,8 +234,81 @@ void loop() {
         drawBlinkingCircle();
     }
 
+    //debounce timer to enable the left and right presses to send a signal if the button is pressed
+    #ifdef DEBOUNCE_BUTTON_TIMER
+      if (millis() - debounceTimer > debounceDelay) {
+        if (key[0].isPressed()) { //this is left arrow button
+          handleButtonPress(0);
+        }
+        if (key[1].isPressed()) { //this is right arrow button
+          handleButtonPress(1);
+        }
+        debounceTimer = millis();
+      }
+    #else
+      if (key[0].isPressed()) { //this is left arrow button
+        handleButtonPress(0);
+      }
+      if (key[1].isPressed()) { //this is right arrow button
+        handleButtonPress(1);
+      }
+    #endif
+
+    uint8_t toSend[4] = {0x27, 0x04, 0x55, 0x55};
+    if (key[0].justReleased() || key[1].justReleased()) {
+      sendCommand(toSend, 0x04, targetIP, targetPort);
+    }
+
     delay(10);
 }//loop()
+
+void OnDataRecv(const esp_now_recv_info_t* messageInfo, const uint8_t* incomingData, int len) {
+  // for (int i = 0; i < 6; i++) {
+  //   Serial.print(messageInfo->src_addr[i], HEX); Serial.print(":");
+  // }
+  // Serial.println();
+  uint8_t* recvData = (uint8_t*)incomingData;
+  int recvLength = len;
+  idx = 0;
+  if (!screenReady) { //to prevent the thing from crashing / heap error / badness (also, depending on the model board used, the WiFi antenna can mess with the TFT init. my board is one such case)
+    return;
+  }
+
+  switch(recvData[0]) {
+    case 0x25:  //this means we got one chunk of the data, loading it into frame buffer
+      // Serial.println("CHUNK RECV'D");
+      idx = recvData[1];  //seq num of this packet
+      chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+      // Serial.print(chunk_size); Serial.print(" "); Serial.print(recvLength);Serial.print(" "); Serial.println(idx);
+
+      fb_i = idx * chunk_size;
+      memcpy(&fb[fb_i], &recvData[8], chunk_size);  //chunk_size should be same as recvLength - 8 but not leaving anything to chance
+    break;
+    case 0x26: //last chunk of data was received, reset buffer pointer, display image
+      idx = recvData[1];  //seq num of this packet
+      chunk_size = (recvData[2]<<24) | (recvData[3]<<16) | (recvData[4]<<8) | (recvData[5]); 
+      // Serial.print("-----");Serial.print(chunk_size); Serial.print(" "); Serial.println(recvLength);
+      fb_i = idx * chunk_size;
+      memcpy(&fb[fb_i], &recvData[8], recvLength - 8);
+      fb_i += recvLength - 8; //total length of image
+      if (isValidJPEG(fb, fb_i)) {
+        fbReady = true;
+        writefb = fb;
+        writefb_i = fb_i;
+      }
+      fb_i = 0;
+    break;
+    default:  //unknown packet type, don't respond
+      Serial.println("Unknownpacket");
+    break;
+
+  } //end of switchcase
+
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  return;
+}
 
 void copyRAMintoFile(uint8_t* buf, int len, fs::FS &fs, const char * path) {
     // Serial.printf("Reading file: %s\r\n", path);
@@ -476,7 +570,6 @@ void handleUDPClient() {   //for use by the screen (client and Access Point)
   }
 }   //handleUDPClient
 
-
 void initButtons() { 
   uint16_t bWidth = 50;
   uint16_t bHeight = 50;
@@ -591,7 +684,7 @@ void printTouchToDisplay(TouchPoint p) {
   temp = "raw XY: " + String(p.xRaw) + ", " + String(p.yRaw);
   tft.drawCentreString(temp, x, y, fontSize);
 }
-
+//also for debugging purposes
 void printTouchToSerial(TouchPoint p) {
   Serial.print("Pressure = ");
   Serial.print(p.zRaw);
@@ -646,7 +739,18 @@ void handleButtonPress(uint8_t button) {
   updateShutterButton(); // Update the shutter button color and redraw
 
   uint8_t toSend[4] = {0x27, 0x04, byteToSend, byteToSend};
-  udp.writeTo(toSend, 0x04, targetIP, targetPort);
+  sendCommand(toSend, 0x04, targetIP, targetPort);
+}
+
+void sendCommand(uint8_t* toSend, uint32_t size, IPAddress targetIP, uint16_t targetPort) {
+  #ifdef COMM_USING_UDP
+    udp.writeTo(toSend, size, targetIP, targetPort);
+  #else
+    // Serial.println("in sendCommand for esp-now");
+    esp_err_t result = esp_now_send(broadcastAddress, toSend, size);
+    delay(5);
+    result = esp_now_send(broadcastAddress2, toSend, size);
+  #endif
 }
 
 void updateShutterButton() {
